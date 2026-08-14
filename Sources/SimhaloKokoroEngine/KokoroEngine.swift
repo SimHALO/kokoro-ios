@@ -40,6 +40,13 @@ public final class KokoroEngine: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "voices.npz unreadable"])
     }
     voices = v
+    // MEMORY DISCIPLINE (Luke's build-34 bench: engine loaded and synthesized,
+    // then iOS's watchdog silently killed the app mid-suite — no crash dialog,
+    // the jetsam signature). MLX caches GPU buffers per generation and never
+    // trims; on top of 312MB fp32 weights, back-to-back syntheses walk the
+    // footprint over the limit. Cap the cache small — synthesis prefers
+    // re-allocation over a corpse — and purge after every chunk below.
+    Memory.cacheLimit = 64 * 1024 * 1024
     tts = KokoroTTS(modelPath: modelPath, g2p: .misaki)
   }
 
@@ -58,8 +65,13 @@ public final class KokoroEngine: @unchecked Sendable {
     // single generations OOM 4GB devices. Sim lines are 1-3 sentences.
     var samples: [Float] = []
     for chunk in sentenceChunks(text) {
-      let (audio, _) = try tts.generateAudio(voice: voice, language: language, text: chunk)
-      samples.append(contentsOf: audio)
+      try autoreleasepool {
+        let (audio, _) = try tts.generateAudio(voice: voice, language: language, text: chunk)
+        samples.append(contentsOf: audio)
+      }
+      // Return cached GPU buffers to the OS between chunks — the difference
+      // between a bounded sawtooth and a monotonic climb into the watchdog.
+      Memory.clearCache()
     }
     return (samples, KokoroTTS.Constants.samplingRate)
   }
