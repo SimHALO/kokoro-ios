@@ -13,22 +13,27 @@ import MLX
 import KokoroSwift
 import MLXUtilsLibrary
 
-public enum KokoroEngine {
-  private static var tts: KokoroTTS?
-  private static var voices: [String: MLXArray] = [:]
-  private static let lock = NSLock()
+// @unchecked Sendable: every access to the mutable state below goes through
+// `lock` — Swift 6 cannot see that, so we assert it. A `static let shared`
+// is immutable global state and passes strict concurrency.
+public final class KokoroEngine: @unchecked Sendable {
+  public static let shared = KokoroEngine()
+  private init() {}
+  private var tts: KokoroTTS?
+  private var voices: [String: MLXArray] = [:]
+  private let lock = NSLock()
 
-  public static var isLoaded: Bool {
+  public var isLoaded: Bool {
     lock.lock(); defer { lock.unlock() }
     return tts != nil && !voices.isEmpty
   }
 
-  public static var availableVoices: [String] {
+  public var availableVoices: [String] {
     lock.lock(); defer { lock.unlock() }
     return voices.keys.map { $0.replacingOccurrences(of: ".npy", with: "") }.sorted()
   }
 
-  public static func load(modelPath: URL, voicesPath: URL) throws {
+  public func load(modelPath: URL, voicesPath: URL) throws {
     lock.lock(); defer { lock.unlock() }
     guard let v = NpyzReader.read(fileFromPath: voicesPath), !v.isEmpty else {
       throw NSError(domain: "KokoroEngine", code: 3,
@@ -38,7 +43,7 @@ public enum KokoroEngine {
     tts = KokoroTTS(modelPath: modelPath, g2p: .misaki)
   }
 
-  public static func synthesize(text: String, voiceId: String) throws -> (samples: [Float], sampleRate: Int) {
+  public func synthesize(text: String, voiceId: String) throws -> (samples: [Float], sampleRate: Int) {
     lock.lock(); defer { lock.unlock() }
     guard let tts = tts else {
       throw NSError(domain: "KokoroEngine", code: 4,
@@ -59,7 +64,7 @@ public enum KokoroEngine {
     return (samples, KokoroTTS.Constants.samplingRate)
   }
 
-  static func sentenceChunks(_ text: String) -> [String] {
+  func sentenceChunks(_ text: String) -> [String] {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return [] }
     var parts: [String] = []
