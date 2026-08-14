@@ -47,7 +47,7 @@ public final class KokoroEngine: @unchecked Sendable {
     // footprint over the limit. Cap the cache small — synthesis prefers
     // re-allocation over a corpse — and purge after every chunk below.
     Memory.cacheLimit = 64 * 1024 * 1024
-    tts = KokoroTTS(modelPath: modelPath, g2p: .misaki)
+    tts = try withError { KokoroTTS(modelPath: modelPath, g2p: .misaki) }
   }
 
   public func synthesize(text: String, voiceId: String) throws -> (samples: [Float], sampleRate: Int) {
@@ -65,8 +65,16 @@ public final class KokoroEngine: @unchecked Sendable {
     // single generations OOM 4GB devices. Sim lines are 1-3 sentences.
     var samples: [Float] = []
     for chunk in sentenceChunks(text) {
+      // withError: MLX's internal errors (Metal allocation refusals included)
+      // become THROWN Swift errors instead of the library's default death — on
+      // device an MLX error otherwise surfaces as an anonymous fatalError
+      // ("no resultOut pointer" / _assertionFailure, SIGTRAP), which is
+      // precisely the crash Luke's build-36 bench produced while the identical
+      // suite ran clean on a memory-rich Mac at RTF 14-19x. A thrown error
+      // reaches the bridge, becomes a promise rejection, and the bench prints
+      // the actual Metal message instead of dying.
       try autoreleasepool {
-        let (audio, _) = try tts.generateAudio(voice: voice, language: language, text: chunk)
+        let (audio, _) = try withError { try tts.generateAudio(voice: voice, language: language, text: chunk) }
         samples.append(contentsOf: audio)
       }
       // Return cached GPU buffers to the OS between chunks — the difference
