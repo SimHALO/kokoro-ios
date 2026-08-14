@@ -104,6 +104,35 @@ public final class KokoroEngine: @unchecked Sendable {
         parts.append(tail)
       }
     }
-    return parts.isEmpty ? [trimmed] : parts
+    if parts.isEmpty { parts = [trimmed] }
+    // SUB-SENTENCE SPLIT for long single sentences. Luke's device crash
+    // (build 37, symbolicated): mlx::core::Full::eval_gpu failing mid-fill on
+    // a 225-char one-sentence checklist line producing ~15s of audio in ONE
+    // generation — the decoder's intermediates blow the phone's GPU allocator
+    // while a Mac runs the identical line clean. Same shape as the lineage's
+    // documented long-clip OOM, at the phone's threshold. Splitting at clause
+    // boundaries caps each generation at a few seconds of audio; the pause at
+    // a comma is where a human reader breathes anyway.
+    var bounded: [String] = []
+    for part in parts {
+      if part.count <= 140 { bounded.append(part); continue }
+      var piece = ""
+      for ch in part {
+        piece.append(ch)
+        if piece.count >= 90, ch == "," || ch == ";" || ch == "\u{2014}" {
+          bounded.append(piece.trimmingCharacters(in: .whitespaces))
+          piece = ""
+        }
+      }
+      let rest = piece.trimmingCharacters(in: .whitespaces)
+      if !rest.isEmpty {
+        if let last = bounded.last, rest.count < 40, last.count + rest.count < 160 {
+          bounded[bounded.count - 1] = last + " " + rest
+        } else {
+          bounded.append(rest)
+        }
+      }
+    }
+    return bounded.isEmpty ? [trimmed] : bounded
   }
 }
