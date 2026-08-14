@@ -12,14 +12,7 @@ let package = Package(
     .library(
       name: "SimhaloKokoroEngine",
       type: .static,
-      targets: [
-    .target(
-      name: "SimhaloKokoroEngine",
-      dependencies: [
-        "KokoroSwift",
-        .product(name: "MLX", package: "mlx-swift"),
-        .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
-      ]),"SimhaloKokoroEngine"]),
+      targets: ["SimhaloKokoroEngine"]),
     .library(
       name: "KokoroSwift",
       type: .static,
@@ -33,6 +26,14 @@ let package = Package(
     .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6")
   ],
   targets: [
+    .target(
+      name: "SimhaloKokoroEngine",
+      dependencies: [
+        "KokoroSwift",
+        .product(name: "MLX", package: "mlx-swift"),
+        .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
+      ],
+      path: "Sources/SimhaloKokoroEngine"),
     .target(
       name: "KokoroSwift",
       dependencies: [
