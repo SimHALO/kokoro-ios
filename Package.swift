@@ -10,6 +10,17 @@ let package = Package(
   ],
   products: [
     .library(
+      name: "SimhaloKokoroEngine",
+      type: .static,
+      targets: [
+    .target(
+      name: "SimhaloKokoroEngine",
+      dependencies: [
+        "KokoroSwift",
+        .product(name: "MLX", package: "mlx-swift"),
+        .product(name: "MLXUtilsLibrary", package: "MLXUtilsLibrary"),
+      ]),"SimhaloKokoroEngine"]),
+    .library(
       name: "KokoroSwift",
       type: .static,
       targets: ["KokoroSwift"]
@@ -18,7 +29,7 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
     // .package(url: "https://github.com/mlalma/eSpeakNGSwift", from: "1.0.1"),
-    .package(url: "https://github.com/mlalma/MisakiSwift", exact: "1.0.6"),
+    .package(url: "https://github.com/SimHALO/MisakiSwift", revision: "8a2ab1c24344311914beb3a34c9f1d9966a945f8"),
     .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6")
   ],
   targets: [
