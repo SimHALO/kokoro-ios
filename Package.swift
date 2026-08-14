@@ -11,7 +11,7 @@ let package = Package(
   products: [
     .library(
       name: "KokoroSwift",
-      type: .dynamic,
+      type: .static,
       targets: ["KokoroSwift"]
     ),
   ],
