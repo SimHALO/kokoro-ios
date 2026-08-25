@@ -22,7 +22,13 @@ public enum KokoroDiagFlags {
   public static nonisolated(unsafe) var decoderBarrier = true
 
   /// SD — deterministic Swift duration head (see SwiftDurationHead.swift).
-  /// PRODUCTION DEFAULT ON: restores PyTorch-truth pacing on device, where
-  /// the MLX duration path diverges by −56%..+193% frames. A/B-able OFF.
-  public static nonisolated(unsafe) var swiftDurationHead = true
+  /// BUILD 47: PRODUCTION DEFAULT OFF. The head is truth-exact on Mac
+  /// (gate 1: integer-exact vs PyTorch, all chunks) but device gate 2
+  /// FAILED decisively: device frames ≈ 40–52% of truth on hash-identical
+  /// rows (dan 46 vs 116, carlos 128 vs 264) — the divergence lives in
+  /// device-side BERT features UPSTREAM of the head, far beyond the
+  /// ±1–2-frame acceptance band. Lever retained for the BERT-divergence
+  /// hunt; Mac kbench forces it ON (truth-exact there). Device pacing
+  /// stays on the MLX path until BERT is resolved.
+  public static nonisolated(unsafe) var swiftDurationHead = false
 }

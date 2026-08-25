@@ -44,12 +44,14 @@ public final class KokoroEngine: @unchecked Sendable {
 
   // BUILD 43→46 LEVERS (2026-08-25) — resolved shape. Forwarded to
   // KokoroTTS / KokoroDiagFlags at synthesis time so they apply regardless of
-  // set-before-load / set-after-load ordering. E2 barriers and the Swift
-  // duration head are PRODUCTION DEFAULTS (both A/B-able from the bench);
-  // every falsified hunt lever (Z, F, E, PD, G, token-P) has been removed.
+  // set-before-load / set-after-load ordering. Build 47: E2 barriers are the
+  // production default; SD is default OFF (device gate 2 failed); every
+  // falsified hunt lever (Z, F, E, PD, G, token-P) has been removed.
   private var stageStatsOn = false
   private var decoderBarrierOn = true
-  private var swiftDurationHeadOn = true
+  // Build 47: SD default OFF — device gate 2 failed (device-BERT feature
+  // divergence, frames ≈ half of truth); see KokoroDiagFlags.
+  private var swiftDurationHeadOn = false
   public var stageStats: Bool {
     get { lock.lock(); defer { lock.unlock() }; return stageStatsOn }
     set { lock.lock(); defer { lock.unlock() }; stageStatsOn = newValue }
@@ -61,7 +63,8 @@ public final class KokoroEngine: @unchecked Sendable {
     set { lock.lock(); defer { lock.unlock() }; decoderBarrierOn = newValue }
   }
   /// SD — deterministic Swift duration head (see SwiftDurationHead).
-  /// PRODUCTION DEFAULT ON since build 46; bench may A/B it OFF.
+  /// Build 47: PRODUCTION DEFAULT OFF — device gate 2 failed (device-BERT
+  /// divergence upstream of the head). Bench may A/B it ON.
   public var swiftDurationHead: Bool {
     get { lock.lock(); defer { lock.unlock() }; return swiftDurationHeadOn }
     set { lock.lock(); defer { lock.unlock() }; swiftDurationHeadOn = newValue }
