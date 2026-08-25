@@ -276,19 +276,39 @@ public final class KokoroTTS {
     stat("dur_features", durationFeatures, into: &diag)
     stat("durations", predictedDurations.asType(.float32), into: &diag)
 
-    // Step 6: Generate aligned encodings
-    let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
+    // Steps 6-8 — BUILD 53: PREDICTOR CPU PIN.
+    // Whole-synthesis on CPU (build 52) is CORRECT on Mac but ~180x slower
+    // (38.7s for a 3.4s row) — diagnostic only, never shippable. The cost is
+    // all in the vocoder, which upsamples to 24 kHz; the prediction stack runs
+    // on ~100 tokens and is cheap. These are exactly the stages measured
+    // divergent on device (text_enc 0.65-0.69x Mac, asr 0.64-0.81x, f0
+    // 0.75-0.79x, n 0.42-0.52x) and they feed everything downstream. So: pin
+    // the cheap divergent part, leave the expensive part on GPU (convPost
+    // itself pinned since build 50). eval() inside the scope - mlx binds the
+    // stream when ops are constructed.
+    let alignedEncoding: MLXArray, f0Prediction: MLXArray, nPrediction: MLXArray
+    let textEncoding: MLXArray, asrFeatures: MLXArray
+    func predictorPath() -> (MLXArray, MLXArray, MLXArray, MLXArray, MLXArray) {
+      let aligned = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
+      let (f0, n) = prosodyPredictor.F0NTrain(x: aligned, s: globalStyle)
+      let te = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
+      let asr = MLX.matmul(te, alignmentTarget)
+      return (aligned, f0, n, te, asr)
+    }
+    if KokoroDiagFlags.cpuPredictors {
+      (alignedEncoding, f0Prediction, nPrediction, textEncoding, asrFeatures) =
+        Device.withDefaultDevice(Device(.cpu)) {
+          let r = predictorPath()
+          eval(r.0, r.1, r.2, r.3, r.4)
+          return r
+        }
+    } else {
+      (alignedEncoding, f0Prediction, nPrediction, textEncoding, asrFeatures) = predictorPath()
+    }
     stat("aligned", alignedEncoding, into: &diag)
-
-    // Step 7: Predict prosody (F0, pitch)
-    let (f0Prediction, nPrediction) = prosodyPredictor.F0NTrain(x: alignedEncoding, s: globalStyle)
     stat("f0", f0Prediction, into: &diag)
     stat("n", nPrediction, into: &diag)
-
-    // Step 8: Encode text for decoder
-    let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
     stat("text_enc", textEncoding, into: &diag)
-    let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
     stat("asr", asrFeatures, into: &diag)
 
     diag.totalFrames = alignmentTarget.dim(-1)

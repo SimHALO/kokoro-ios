@@ -58,7 +58,12 @@ public extension KokoroDiagFlags {
   /// BUILD 52 — run the ENTIRE synthesis on the CPU stream. Default ON as the
   /// decisive test of whether A-series Metal kernel divergence explains the
   /// whole fault (it already explains the vocoder). A/B-able from the bench.
-  nonisolated(unsafe) static var cpuSynthesis = true
+  nonisolated(unsafe) static var cpuSynthesis = false
+
+  /// BUILD 53 - pin the PREDICTION stack (aligned / F0 / N / textEncoder / asr)
+  /// to the CPU stream. Those are the divergent-but-cheap stages; the vocoder
+  /// stays on GPU because whole-CPU costs ~180x (Mac: 38.7s for a 3.4s row).
+  nonisolated(unsafe) static var cpuPredictors = true
 
   nonisolated(unsafe) static var collectGenStats = false
   nonisolated(unsafe) static var genStats: [String: [Float]] = [:]
