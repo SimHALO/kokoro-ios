@@ -25,4 +25,19 @@ public enum KokoroDiagFlags {
   /// every stage boundary and audio still corrupted — the defect is inside
   /// the decoder graph. See Generator.callAsFunction.
   public static nonisolated(unsafe) var decoderBarrier = false
+
+  /// BUILD 45 CANDIDATE — pin the ENTIRE token→durations path (BERT +
+  /// durationEncoder + LSTM + proj + sigmoid/round) to the CPU stream.
+  /// A2 fix: arm-D adjudication proved every token-identical chunk gets
+  /// deterministically different durations on the device GPU (−56%..+193%);
+  /// Mac CPU == Mac GPU sample counts prove the CPU reference is the model's
+  /// true output. See KokoroTTS.generateAudio.
+  public static nonisolated(unsafe) var cpuDurationHead = false
+
+  /// BUILD 45 CANDIDATE (branch β) — pin the decoder's source-STFT and
+  /// inverse-STFT to the CPU stream. Arm-B falsified the asStrided theory;
+  /// spike geography (frame-quantised bursts) points at the tiny
+  /// nFft=20 FFT/overlap-add kernels — the mlx #2205 wrong-kernel class on
+  /// A-series. Tiny FFTs: expected performance-neutral. See Generator.
+  public static nonisolated(unsafe) var cpuDecoderStft = false
 }

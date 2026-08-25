@@ -244,23 +244,40 @@ public final class KokoroTTS {
     // Step 3: Extract style embeddings from voice
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
 
-    // Step 4: Encode text with BERT and predict duration
-    let durationFeatures = encodeBERTAndDuration(
-      inputIds: paddedInputIds,
-      attentionMask: attentionMask,
-      inputLengths: inputLengths,
-      textMask: textMask,
-      style: globalStyle
-    )
+    // Steps 4+5: BERT → duration features → durations (+ alignment).
+    // BUILD 45 CANDIDATE (cpuDurationHead): the whole token→durations path on
+    // the CPU stream — A2 is a device-GPU numeric defect (arm-D: all
+    // token-identical chunks diverge deterministically, −56%..+193%), and
+    // Mac CPU == Mac GPU proves the CPU reference is the model's true output.
+    // eval() INSIDE the scope: mlx ops capture the default stream at
+    // construction; nothing may escape lazily onto the GPU stream.
+    func durationPath() -> (MLXArray, MLXArray, MLXArray) {
+      let df = encodeBERTAndDuration(
+        inputIds: paddedInputIds,
+        attentionMask: attentionMask,
+        inputLengths: inputLengths,
+        textMask: textMask,
+        style: globalStyle
+      )
+      let (pd, at) = predictDurations(
+        features: df, batchSize: paddedInputIds.shape[1], speed: speed)
+      return (df, pd, at)
+    }
+    let durationFeatures: MLXArray
+    let predictedDurations: MLXArray
+    let alignmentTarget: MLXArray
+    if KokoroDiagFlags.cpuDurationHead {
+      (durationFeatures, predictedDurations, alignmentTarget) =
+        Device.withDefaultDevice(Device(.cpu)) {
+          let r = durationPath()
+          eval(r.0, r.1, r.2)
+          return r
+        }
+    } else {
+      (durationFeatures, predictedDurations, alignmentTarget) = durationPath()
+    }
     barrier(durationFeatures)
     stat("dur_features", durationFeatures, into: &diag)
-
-    // Step 5: Predict phoneme durations
-    let (predictedDurations, alignmentTarget) = predictDurations(
-      features: durationFeatures,
-      batchSize: paddedInputIds.shape[1],
-      speed: speed
-    )
     barrier(predictedDurations, alignmentTarget)
     stat("durations", predictedDurations.asType(.float32), into: &diag)
 
