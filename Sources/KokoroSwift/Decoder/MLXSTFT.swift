@@ -96,10 +96,27 @@ func mlxStft(
     fatalError("Input is too short")
   }
 
-  let shape: [Int] = [numFrames, nFft]
-  let strides: [Int] = [hopLen, 1]
-
-  let frames = MLX.asStrided(xArray, shape, strides: strides)
+  // BUILD 44 AUDIT (2026-08-25): the framing arithmetic is provably in-bounds —
+  // floor((len-nFft)/hop) guarantees (numFrames-1)*hop + nFft <= len, and with
+  // center padding len >= nFft always. The residual hazard is the asStrided
+  // CONTIGUITY CONTRACT: xArray is a lazily-concatenated reflect-pad built from
+  // negative-stride slice views (see pad() above), and MLX.asStrided reads the
+  // input's flat buffer assuming row-contiguity. If that assumption is violated
+  // on the iOS Metal allocator path (recycled/donated buffers), reads land in
+  // garbage (stochastic spikes) or unmapped pages (SIGSEGV) — the mlx-swift
+  // #121 class. Toggle Z below removes the assumption entirely: explicit
+  // slice-stack framing uses only standard view primitives.
+  let frames: MLXArray
+  if KokoroDiagFlags.safeFraming {
+    frames = MLX.stacked(
+      (0 ..< numFrames).map { xArray[($0 * hopLen) ..< ($0 * hopLen + nFft)] },
+      axis: 0
+    )
+  } else {
+    let shape: [Int] = [numFrames, nFft]
+    let strides: [Int] = [hopLen, 1]
+    frames = MLX.asStrided(xArray, shape, strides: strides)
+  }
 
   let spec = MLXFFT.rfft(frames * w)
   return spec.transposed(1, 0)

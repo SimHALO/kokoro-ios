@@ -29,36 +29,41 @@ public final class KokoroTTS {
     case tooManyTokens
   }
 
-  // BUILD 43 (2026-08-25) — device-corruption hunt: instrumentation + candidate fix.
-  // Three device benches (iPhone 16 Pro Max, builds 41-42) corrupt ONLY on small
-  // chunks (≤ ~3.6s audio); Mac CPU + GPU are clean 8/8 on the same revision.
-  // Working theory: a small-size Metal kernel-variant path misbehaves on
-  // A-series. These levers are bench-driven; all default OFF (production
-  // behaviour identical to build 42 unless a lever is thrown).
+  // BUILD 43→44 (2026-08-25) — device-corruption hunt: instrumentation + probes.
+  // Build-43 run-3 established: corruption enters at the decoder/vocoder (only
+  // the audio stage is pass-unstable), stochastic, sustained-load sensitive,
+  // spikes biased to the buffer head; the token stage additionally diverges
+  // device-vs-Mac (G2P via OS NLTagger + a gated numeric suspect). Build-44
+  // levers: token-identity diag (always on), Z safe-framing and E2 decoder
+  // barriers (KokoroDiagFlags), F frame-stage padding (below). Token-stage
+  // bucket padding (build-43 "P") is REMOVED: it crashed on device (SIGSEGV)
+  // and measurably compressed real-token durations 10-32% through the biLSTM
+  // backward pass — falsified twice over.
 
   /// Per-synthesis diagnostics, populated on every generateAudio call.
   public struct SynthDiag {
-    /// Real token count incl. the two boundary zeros, before bucket padding.
+    /// Token count incl. the two boundary zeros.
     public var realTokens = 0
-    /// Sequence length actually synthesised (== realTokens unless padToBucket).
-    public var paddedTokens = 0
-    /// Total decoder frames (incl. frames from pad tokens).
+    /// FNV-1a-64 of the token IDs (hex) — G2P identity across platforms.
+    public var tokensHash = ""
+    /// First 16 token IDs — G2P divergence localisation.
+    public var tokensHead: [Int] = []
+    /// Decoder frames from predicted durations (pre frame-padding).
     public var totalFrames = 0
-    /// Frames belonging to real tokens (audio trimmed to these when padding).
-    public var trueFrames = 0
+    /// Frame-sequence length the decoder actually ran (== totalFrames unless
+    /// frameStagePad).
+    public var paddedFrames = 0
     /// Stage name -> [min, max, rms]. Only when collectStageStats is on.
     public var stageStats: [String: [Float]] = [:]
     public init() {}
   }
 
-  /// CANDIDATE FIX — pad the token sequence to the next bucket in
-  /// {64, 128, 256, 512} with pad token 0. The mask infrastructure
-  /// (textMask / attentionMask / inputLengths) marks the pads exactly as
-  /// upstream StyleTTS2 batch padding does; pad tokens flow through the
-  /// duration predictor and decoder (lengthening the FRAME sequence too, so
-  /// the small-size path is avoided at both token and frame stage), and the
-  /// output audio is trimmed at the true-token frame boundary.
-  public var padToBucket = false
+  /// PROBE F — pad the FRAME-stage tensors (asr / F0 / N) to the next bucket
+  /// in {128, 256, 384, 512} with zeros AFTER alignment, then trim the audio
+  /// back at the true-frame boundary. Token stage untouched — the biLSTM
+  /// contamination that falsified token padding cannot occur here; durations
+  /// are computed before padding and are unchanged.
+  public var frameStagePad = false
 
   /// PROBE — force materialisation between pipeline stages. If corruption
   /// vanishes under barriers, the defect is a lazy-graph/fusion race, not a
@@ -221,13 +226,20 @@ public final class KokoroTTS {
     // Step 1: Convert text to phonemes
     let (phonemizedText, tokenArray) = try phonemizeText(text)
 
-    // Step 2: Tokenize and prepare input (build 43: realCount = tokens before
-    // bucket padding; == sequence length when padToBucket is off)
+    // Step 2: Tokenize and prepare input
     let (paddedInputIds, attentionMask, inputLengths, textMask, inputIds, realCount) = try prepareInputTensors(phonemizedText)
 
     var diag = SynthDiag()
     diag.realTokens = realCount
-    diag.paddedTokens = paddedInputIds.dim(-1)
+    // Build 44 — token identity (always on, host-side, cheap): the G2P stacks
+    // proved OS-divergent (NLTagger); equal token COUNTS do not imply equal
+    // token IDs, so cross-platform comparisons key on this hash.
+    var h: UInt64 = 0xcbf29ce484222325
+    for t in [0] + inputIds + [0] {
+      h = (h ^ UInt64(truncatingIfNeeded: t)) &* 0x100000001b3
+    }
+    diag.tokensHash = String(format: "%016llx", h)
+    diag.tokensHead = Array(inputIds.prefix(16))
 
     // Step 3: Extract style embeddings from voice
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
@@ -267,15 +279,41 @@ public final class KokoroTTS {
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
     barrier(textEncoding)
     stat("text_enc", textEncoding, into: &diag)
-    let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
+    var asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
     barrier(asrFeatures)
     stat("asr", asrFeatures, into: &diag)
+
+    // Build 44 — PROBE F: frame-stage padding. Zero-pad asr / F0 / N along
+    // the frame axis to the next bucket AFTER alignment. Durations were
+    // computed above and are untouched; the biLSTM never sees the pads.
+    // F0/N run at a multiple of the frame rate — pad proportionally.
+    let totalFrames = alignmentTarget.dim(-1)
+    diag.totalFrames = totalFrames
+    var paddedFrames = totalFrames
+    var f0In = f0Prediction
+    var nIn = nPrediction
+    if frameStagePad {
+      let buckets = [128, 256, 384, 512]
+      if let bucket = buckets.first(where: { $0 >= totalFrames }), bucket > totalFrames, totalFrames > 0 {
+        let padF = bucket - totalFrames
+        asrFeatures = MLX.padded(
+          asrFeatures, widths: [IntOrPair([0, 0]), IntOrPair([0, 0]), IntOrPair([0, padF])])
+        let f0Ratio = f0Prediction.dim(-1) / totalFrames
+        let nRatio = nPrediction.dim(-1) / totalFrames
+        f0In = MLX.padded(
+          f0Prediction, widths: [IntOrPair([0, 0]), IntOrPair([0, padF * max(1, f0Ratio)])])
+        nIn = MLX.padded(
+          nPrediction, widths: [IntOrPair([0, 0]), IntOrPair([0, padF * max(1, nRatio)])])
+        paddedFrames = bucket
+      }
+    }
+    diag.paddedFrames = paddedFrames
 
     // Step 9: Generate audio
     let audio = decoder(
       asr: asrFeatures,
-      F0Curve: f0Prediction,
-      N: nPrediction,
+      F0Curve: f0In,
+      N: nIn,
       s: acousticStyle
     )[0]
     stat("audio", audio, into: &diag)
@@ -287,21 +325,14 @@ public final class KokoroTTS {
 
     var samples = audio[0].asArray(Float.self)
 
-    // Build 43: frame accounting + audio trim for bucket padding. The
-    // alignment matrix lays frames out sequentially, so pad-token frames land
-    // at the END of the audio — trim at the true-token frame boundary.
-    let totalFrames = alignmentTarget.dim(-1)
-    diag.totalFrames = totalFrames
-    var trueFrames = totalFrames
-    if diag.paddedTokens > realCount {
-      let t: Int32 = predictedDurations[0 ..< realCount].sum().item()
-      trueFrames = Int(t)
-      if totalFrames > 0, trueFrames < totalFrames, samples.count % totalFrames == 0 {
-        let samplesPerFrame = samples.count / totalFrames
-        samples = Array(samples[0 ..< (samplesPerFrame * trueFrames)])
-      }
+    // Build 44 — trim the frame-padding tail at the true-frame boundary.
+    // Guards make the slice provably in-bounds; divisibility failure degrades
+    // to no-trim (audible pad tail), never a crash.
+    if paddedFrames > totalFrames, totalFrames > 0, samples.count % paddedFrames == 0 {
+      let samplesPerFrame = samples.count / paddedFrames
+      let keep = min(samplesPerFrame * totalFrames, samples.count)
+      samples = Array(samples[0 ..< keep])
     }
-    diag.trueFrames = trueFrames
     lastDiag = diag
 
     // Stop performance timing
@@ -349,12 +380,15 @@ public final class KokoroTTS {
   
   /// Prepares input tensors for the model from phonemized text.
   /// - Returns: Tuple containing:
-  ///   - paddedInputIds: Tokenized and padded input sequence
+  ///   - paddedInputIds: Tokenized input sequence with boundary zeros
   ///   - attentionMask: Mask for attention mechanism
-  ///   - inputLengths: REAL length of input sequence (excl. bucket pads)
-  ///   - textMask: Mask for text padding (true at bucket-pad positions)
-  ///   - inputIds: Original token IDs before padding
-  ///   - realCount: token count incl. boundary zeros, excl. bucket pads
+  ///   - inputLengths: Length of input sequence
+  ///   - textMask: Mask for text padding
+  ///   - inputIds: Original token IDs before boundary zeros
+  ///   - realCount: token count incl. boundary zeros
+  /// Build 44: token-stage bucket padding (build-43 "P") REMOVED — device
+  /// SIGSEGV + biLSTM duration contamination. Pre-43 tensor semantics hold:
+  /// sequence length == realCount, masks flag nothing.
   private func prepareInputTensors(_ phonemizedText: String) throws -> (MLXArray, MLXArray, MLXArray, MLXArray, [Int], Int) {
     // Tokenize phonemized text
     let inputIds = Tokenizer.tokenize(phonemizedText: phonemizedText)
@@ -365,26 +399,12 @@ public final class KokoroTTS {
     }
 
     // Add padding tokens at start and end
-    var paddedInputIdsArray = [0] + inputIds + [0]
+    let paddedInputIdsArray = [0] + inputIds + [0]
     let realCount = paddedInputIdsArray.count
-
-    // Build 43 — CANDIDATE FIX: bucket padding. Device benches corrupt only on
-    // small sequences; pad to the next bucket so short chunks traverse the
-    // same kernel-size class as the (clean) longer ones. The masks below mark
-    // the pads, exactly as upstream batch padding would.
-    if padToBucket {
-      let buckets = [64, 128, 256, 512]
-      if let bucket = buckets.first(where: { $0 >= realCount }), bucket > realCount {
-        paddedInputIdsArray += Array(repeating: 0, count: bucket - realCount)
-      }
-    }
 
     let paddedInputIds = MLXArray(paddedInputIdsArray).expandedDimensions(axes: [0])
 
-    // Create input length tensor — REAL length: with bucket padding active the
-    // masks derived from it flag every pad position; without padding the
-    // sequence length equals realCount and nothing is masked (pre-43 semantics
-    // preserved bit-for-bit).
+    // Create input length tensor
     let inputLengths = MLXArray(realCount)
     let inputLengthMax: Int = paddedInputIds.dim(-1)
 

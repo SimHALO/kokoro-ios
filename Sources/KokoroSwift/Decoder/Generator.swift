@@ -152,7 +152,10 @@ class Generator {
 
     harSource = MLX.squeezed(harSource.transposed(0, 2, 1), axis: 1)
     let (harSpec, harPhase) = stft.transform(inputData: harSource)
-    
+    // BUILD 44 (E2): decoder-internal barrier — materialise the source STFT
+    // before the upsample chain consumes it.
+    if KokoroDiagFlags.decoderBarrier { MLX.eval(harSpec, harPhase) }
+
     var har = MLX.concatenated([harSpec, harPhase], axis: 1)
     har = MLX.swappedAxes(har, 2, 1)
         
@@ -182,8 +185,10 @@ class Generator {
         }
       }
       newX = xs! / numKernels
+      // BUILD 44 (E2): materialise after each upsample block group.
+      if KokoroDiagFlags.decoderBarrier { MLX.eval(newX) }
     }
-    
+
     newX = LeakyReLU(negativeSlope: 0.01)(newX)
 
     newX = MLX.swappedAxes(newX, 2, 1)
@@ -192,8 +197,12 @@ class Generator {
     
     let spec = MLX.exp(newX[0..., 0 ..< (postNFFt / 2 + 1), 0...])
     let phase = MLX.sin(newX[0..., (postNFFt / 2 + 1)..., 0...])
+    // BUILD 44 (E2): materialise around the inverse STFT — the last internal
+    // boundary before samples exist.
+    if KokoroDiagFlags.decoderBarrier { MLX.eval(spec, phase) }
 
     let result = stft.inverse(magnitude: spec, phase: phase)
+    if KokoroDiagFlags.decoderBarrier { MLX.eval(result) }
     return result
   }
 }

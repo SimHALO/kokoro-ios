@@ -42,16 +42,16 @@ public final class KokoroEngine: @unchecked Sendable {
     }
   }
 
-  // BUILD 43 LEVERS (2026-08-25) — small-chunk corruption hunt. All default
-  // OFF; forwarded to KokoroTTS at synthesis time so they apply regardless of
-  // set-before-load / set-after-load ordering. See KokoroTTS for semantics.
-  private var padToBucketOn = false
+  // BUILD 43→44 LEVERS (2026-08-25) — corruption hunt. All default OFF;
+  // forwarded to KokoroTTS / KokoroDiagFlags at synthesis time so they apply
+  // regardless of set-before-load / set-after-load ordering. Build-43's
+  // token-padding lever (P) is REMOVED — device SIGSEGV + duration
+  // contamination. See KokoroTTS + KokoroDiagFlags for semantics.
   private var evalBarrierOn = false
   private var stageStatsOn = false
-  public var padToBucket: Bool {
-    get { lock.lock(); defer { lock.unlock() }; return padToBucketOn }
-    set { lock.lock(); defer { lock.unlock() }; padToBucketOn = newValue }
-  }
+  private var safeFramingOn = false
+  private var decoderBarrierOn = false
+  private var frameStagePadOn = false
   public var evalBarrier: Bool {
     get { lock.lock(); defer { lock.unlock() }; return evalBarrierOn }
     set { lock.lock(); defer { lock.unlock() }; evalBarrierOn = newValue }
@@ -59,6 +59,21 @@ public final class KokoroEngine: @unchecked Sendable {
   public var stageStats: Bool {
     get { lock.lock(); defer { lock.unlock() }; return stageStatsOn }
     set { lock.lock(); defer { lock.unlock() }; stageStatsOn = newValue }
+  }
+  /// Z — asStrided-free STFT framing (see MLXSTFT / KokoroDiagFlags).
+  public var safeFraming: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return safeFramingOn }
+    set { lock.lock(); defer { lock.unlock() }; safeFramingOn = newValue }
+  }
+  /// E2 — decoder-internal materialisation barriers (see Generator).
+  public var decoderBarrier: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return decoderBarrierOn }
+    set { lock.lock(); defer { lock.unlock() }; decoderBarrierOn = newValue }
+  }
+  /// F — frame-stage padding of asr/F0/N post-alignment (see KokoroTTS).
+  public var frameStagePad: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return frameStagePadOn }
+    set { lock.lock(); defer { lock.unlock() }; frameStagePadOn = newValue }
   }
 
   // Per-chunk diagnostics of the most recent synthesize() call. Foundation
@@ -110,10 +125,12 @@ public final class KokoroEngine: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "unknown voice \(voiceId)"])
     }
     let language: Language = voiceId.hasPrefix("b") ? .enGB : .enUS
-    // Build 43: forward the levers at synthesis time (ordering-safe).
-    tts.padToBucket = padToBucketOn
+    // Build 44: forward the levers at synthesis time (ordering-safe).
     tts.evalBarrier = evalBarrierOn
     tts.collectStageStats = stageStatsOn
+    tts.frameStagePad = frameStagePadOn
+    KokoroDiagFlags.safeFraming = safeFramingOn
+    KokoroDiagFlags.decoderBarrier = decoderBarrierOn
     chunkDiags = []
     // Sentence chunking: the engine caps at 510 phonemes per call, and long
     // single generations OOM 4GB devices. Sim lines are 1-3 sentences.
@@ -138,9 +155,10 @@ public final class KokoroEngine: @unchecked Sendable {
         var entry: [String: Any] = [
           "chars": chunk.count,
           "tokens_real": d.realTokens,
-          "tokens_padded": d.paddedTokens,
+          "tokens_hash": d.tokensHash,
+          "tokens_head": d.tokensHead,
           "frames_total": d.totalFrames,
-          "frames_true": d.trueFrames,
+          "frames_padded": d.paddedFrames,
           "sample_start": sampleStart,
           "sample_count": audio.count,
         ]
