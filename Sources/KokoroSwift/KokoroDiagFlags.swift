@@ -47,6 +47,14 @@ public enum KokoroDiagFlags {
 // production pays nothing. Same external-synchronization contract as the
 // flags above: written on the single serial synth queue.
 public extension KokoroDiagFlags {
+  /// BUILD 50 — PRODUCTION DEFAULT ON. Runs Generator's final convolution on
+  /// the CPU stream. The Metal variant for this layer's shape returns a
+  /// range-collapsed result on A-series (device 0.12-0.16x Mac RMS, range
+  /// [-4.1,+5.0] vs Mac [-36.6,+14.4]) which flattens the magnitude spectrum
+  /// after exp() and destroys all formant structure. Mac is unaffected
+  /// (same values either way); the flag exists so the bench can A/B it.
+  nonisolated(unsafe) static var cpuPostConv = true
+
   nonisolated(unsafe) static var collectGenStats = false
   nonisolated(unsafe) static var genStats: [String: [Float]] = [:]
 

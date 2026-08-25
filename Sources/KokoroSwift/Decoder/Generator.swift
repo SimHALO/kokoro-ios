@@ -203,7 +203,28 @@ class Generator {
     newX = LeakyReLU(negativeSlope: 0.01)(newX)
 
     newX = MLX.swappedAxes(newX, 2, 1)
-    newX = convPost(newX, conv: MLX.conv1d)
+    // BUILD 50 — THE FIX. Build-49 telemetry localised the device fault to
+    // exactly this convolution. Every stage before it matches Mac within
+    // 0.85-1.2x; convPost's output collapses to 0.12-0.16x of Mac RMS on all
+    // 8 rows, and its DYNAMIC RANGE is destroyed: Mac [-36.6, +14.4], device
+    // [-4.1, +5.0]. Since spec = exp(firstHalf), Mac's large negatives
+    // exponentiate to true spectral valleys (formants); the device's squashed
+    // range floors the spectrum at ~0.016 — a near-flat magnitude envelope.
+    // That is precisely the measured device audio: pitch intact, no formants,
+    // 76-91% of energy above 6 kHz. One wrong Metal conv variant on A-series
+    // (mlx #2205 class), one utterly broken voice.
+    // Fix: run this single small conv on the CPU stream. Unified memory makes
+    // the transfer free; it is one layer on a [1, 22, frames] tensor.
+    let preConv = newX
+    if KokoroDiagFlags.cpuPostConv {
+      newX = Device.withDefaultDevice(Device(.cpu)) {
+        let r = convPost(preConv, conv: MLX.conv1d)
+        MLX.eval(r)
+        return r
+      }
+    } else {
+      newX = convPost(preConv, conv: MLX.conv1d)
+    }
     newX = MLX.swappedAxes(newX, 2, 1)
     KokoroDiagFlags.genStat("gen_postconv", newX)
     
