@@ -29,16 +29,12 @@ public final class KokoroTTS {
     case tooManyTokens
   }
 
-  // BUILD 43→44 (2026-08-25) — device-corruption hunt: instrumentation + probes.
-  // Build-43 run-3 established: corruption enters at the decoder/vocoder (only
-  // the audio stage is pass-unstable), stochastic, sustained-load sensitive,
-  // spikes biased to the buffer head; the token stage additionally diverges
-  // device-vs-Mac (G2P via OS NLTagger + a gated numeric suspect). Build-44
-  // levers: token-identity diag (always on), Z safe-framing and E2 decoder
-  // barriers (KokoroDiagFlags), F frame-stage padding (below). Token-stage
-  // bucket padding (build-43 "P") is REMOVED: it crashed on device (SIGSEGV)
-  // and measurably compressed real-token durations 10-32% through the biLSTM
-  // backward pass — falsified twice over.
+  // BUILD 43→46 (2026-08-25) — the device-corruption hunt, resolved shape.
+  // Retained: token-identity diag (always on), per-chunk diag, stage stats,
+  // E2 decoder barriers (production default, KokoroDiagFlags), and the
+  // deterministic Swift duration head (production default) that fixes the
+  // device pacing divergence. All falsified levers removed — the record
+  // lives in the project design notes.
 
   /// Per-synthesis diagnostics, populated on every generateAudio call.
   public struct SynthDiag {
@@ -48,27 +44,12 @@ public final class KokoroTTS {
     public var tokensHash = ""
     /// First 16 token IDs — G2P divergence localisation.
     public var tokensHead: [Int] = []
-    /// Decoder frames from predicted durations (pre frame-padding).
+    /// Decoder frames from predicted durations.
     public var totalFrames = 0
-    /// Frame-sequence length the decoder actually ran (== totalFrames unless
-    /// frameStagePad).
-    public var paddedFrames = 0
     /// Stage name -> [min, max, rms]. Only when collectStageStats is on.
     public var stageStats: [String: [Float]] = [:]
     public init() {}
   }
-
-  /// PROBE F — pad the FRAME-stage tensors (asr / F0 / N) to the next bucket
-  /// in {128, 256, 384, 512} with zeros AFTER alignment, then trim the audio
-  /// back at the true-frame boundary. Token stage untouched — the biLSTM
-  /// contamination that falsified token padding cannot occur here; durations
-  /// are computed before padding and are unchanged.
-  public var frameStagePad = false
-
-  /// PROBE — force materialisation between pipeline stages. If corruption
-  /// vanishes under barriers, the defect is a lazy-graph/fusion race, not a
-  /// kernel-variant miscompute.
-  public var evalBarrier = false
 
   /// PROBE — collect per-stage min/max/rms into lastDiag.stageStats for
   /// golden comparison against a Mac reference run. NOTE: computing stats
@@ -93,6 +74,9 @@ public final class KokoroTTS {
   
   /// Projection layer for final duration values
   private let durationProj: Linear!
+
+  /// Build 46 — deterministic Swift duration head (production default path).
+  private let swiftDurationHead: SwiftDurationHead!
   
   /// Predictor for prosodic features (F0, pitch)
   private let prosodyPredictor: ProsodyPredictor!
@@ -162,6 +146,15 @@ public final class KokoroTTS {
     durationProj = Linear(
       weight: sanitizedWeights["predictor.duration_proj.linear_layer.weight"]!,
       bias: sanitizedWeights["predictor.duration_proj.linear_layer.bias"]!
+    )
+
+    // Build 46 — deterministic Swift duration head: same weights, fixed
+    // evaluation order, backend-independent durations (see SwiftDurationHead).
+    swiftDurationHead = SwiftDurationHead(
+      weights: sanitizedWeights,
+      nLayers: config.nLayer,
+      dModel: config.hiddenDim,
+      styleDim: config.styleDim
     )
 
     // Initialize prosody predictor (F0, pitch, etc.)
@@ -245,14 +238,28 @@ public final class KokoroTTS {
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
 
     // Steps 4+5: BERT → duration features → durations (+ alignment).
-    // BUILD 45 DIAGNOSTIC (cpuDurationHead): whole token→durations path on
-    // the CPU stream. NOT a fix — ground truth (upstream Kokoro PyTorch)
-    // matches MAC-GPU durations sample-exactly; device-GPU AND CPU both
-    // diverge (dan: 116 truth vs 96 device-GPU vs 55 CPU). Retained so the
-    // bench can measure whether CPU-durations move the corruption. 46 pacing
-    // fix = deterministic plain-Swift duration head. eval() INSIDE the scope:
-    // mlx ops capture the default stream at construction.
-    func durationPath() -> (MLXArray, MLXArray, MLXArray) {
+    // BUILD 46 (swiftDurationHead, PRODUCTION DEFAULT): BERT runs on MLX,
+    // then the ENTIRE duration path (encoder stack + predictor LSTM + proj +
+    // round) runs in deterministic plain Swift — the MLX duration path
+    // diverges from PyTorch truth on device GPUs (−56%..+193% frames; same
+    // weights, same tokens). Alignment is built host-side directly from the
+    // Int durations, which also removes the per-frame item() round-trips of
+    // the MLX path (timing win measured separately). OFF path = the original
+    // MLX pipeline, unchanged, for A/B.
+    let durationFeatures: MLXArray
+    let predictedDurations: MLXArray
+    let alignmentTarget: MLXArray
+    if KokoroDiagFlags.swiftDurationHead {
+      let (bertOutput, _) = bert(paddedInputIds, attentionMask: attentionMask)
+      let bertEncoded = bertEncoder(bertOutput)  // [1, T, dModel]
+      let featHost = bertEncoded.asArray(Float.self)
+      let styleHost = globalStyle.reshaped([-1]).asArray(Float.self)
+      let (dfHost, durs) = swiftDurationHead.run(
+        features: featHost, tokenCount: realCount, style: styleHost, speed: speed)
+      durationFeatures = MLXArray(dfHost).reshaped([1, realCount, dfHost.count / realCount])
+      predictedDurations = MLXArray(durs.map { Int32($0) })
+      alignmentTarget = Self.hostAlignment(durations: durs, batchSize: realCount)
+    } else {
       let df = encodeBERTAndDuration(
         inputIds: paddedInputIds,
         attentionMask: attentionMask,
@@ -262,76 +269,33 @@ public final class KokoroTTS {
       )
       let (pd, at) = predictDurations(
         features: df, batchSize: paddedInputIds.shape[1], speed: speed)
-      return (df, pd, at)
+      (durationFeatures, predictedDurations, alignmentTarget) = (df, pd, at)
     }
-    let durationFeatures: MLXArray
-    let predictedDurations: MLXArray
-    let alignmentTarget: MLXArray
-    if KokoroDiagFlags.cpuDurationHead {
-      (durationFeatures, predictedDurations, alignmentTarget) =
-        Device.withDefaultDevice(Device(.cpu)) {
-          let r = durationPath()
-          eval(r.0, r.1, r.2)
-          return r
-        }
-    } else {
-      (durationFeatures, predictedDurations, alignmentTarget) = durationPath()
-    }
-    barrier(durationFeatures)
     stat("dur_features", durationFeatures, into: &diag)
-    barrier(predictedDurations, alignmentTarget)
     stat("durations", predictedDurations.asType(.float32), into: &diag)
 
     // Step 6: Generate aligned encodings
     let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
-    barrier(alignedEncoding)
     stat("aligned", alignedEncoding, into: &diag)
 
     // Step 7: Predict prosody (F0, pitch)
     let (f0Prediction, nPrediction) = prosodyPredictor.F0NTrain(x: alignedEncoding, s: globalStyle)
-    barrier(f0Prediction, nPrediction)
     stat("f0", f0Prediction, into: &diag)
     stat("n", nPrediction, into: &diag)
 
     // Step 8: Encode text for decoder
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
-    barrier(textEncoding)
     stat("text_enc", textEncoding, into: &diag)
-    var asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
-    barrier(asrFeatures)
+    let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
     stat("asr", asrFeatures, into: &diag)
 
-    // Build 44 — PROBE F: frame-stage padding. Zero-pad asr / F0 / N along
-    // the frame axis to the next bucket AFTER alignment. Durations were
-    // computed above and are untouched; the biLSTM never sees the pads.
-    // F0/N run at a multiple of the frame rate — pad proportionally.
-    let totalFrames = alignmentTarget.dim(-1)
-    diag.totalFrames = totalFrames
-    var paddedFrames = totalFrames
-    var f0In = f0Prediction
-    var nIn = nPrediction
-    if frameStagePad {
-      let buckets = [128, 256, 384, 512]
-      if let bucket = buckets.first(where: { $0 >= totalFrames }), bucket > totalFrames, totalFrames > 0 {
-        let padF = bucket - totalFrames
-        asrFeatures = MLX.padded(
-          asrFeatures, widths: [IntOrPair([0, 0]), IntOrPair([0, 0]), IntOrPair([0, padF])])
-        let f0Ratio = f0Prediction.dim(-1) / totalFrames
-        let nRatio = nPrediction.dim(-1) / totalFrames
-        f0In = MLX.padded(
-          f0Prediction, widths: [IntOrPair([0, 0]), IntOrPair([0, padF * max(1, f0Ratio)])])
-        nIn = MLX.padded(
-          nPrediction, widths: [IntOrPair([0, 0]), IntOrPair([0, padF * max(1, nRatio)])])
-        paddedFrames = bucket
-      }
-    }
-    diag.paddedFrames = paddedFrames
+    diag.totalFrames = alignmentTarget.dim(-1)
 
     // Step 9: Generate audio
     let audio = decoder(
       asr: asrFeatures,
-      F0Curve: f0In,
-      N: nIn,
+      F0Curve: f0Prediction,
+      N: nPrediction,
       s: acousticStyle
     )[0]
     stat("audio", audio, into: &diag)
@@ -341,16 +305,7 @@ public final class KokoroTTS {
       TimestampPredictor.preditTimestamps(tokens: tokenArray, predictionDuration: predictedDurations)
     }
 
-    var samples = audio[0].asArray(Float.self)
-
-    // Build 44 — trim the frame-padding tail at the true-frame boundary.
-    // Guards make the slice provably in-bounds; divisibility failure degrades
-    // to no-trim (audible pad tail), never a crash.
-    if paddedFrames > totalFrames, totalFrames > 0, samples.count % paddedFrames == 0 {
-      let samplesPerFrame = samples.count / paddedFrames
-      let keep = min(samplesPerFrame * totalFrames, samples.count)
-      samples = Array(samples[0 ..< keep])
-    }
+    let samples = audio[0].asArray(Float.self)
     lastDiag = diag
 
     // Stop performance timing
@@ -359,10 +314,19 @@ public final class KokoroTTS {
     return (samples, tokenArray)
   }
 
-  /// Build 43 — force materialisation between stages when evalBarrier is on.
-  private func barrier(_ arrays: MLXArray...) {
-    guard evalBarrier else { return }
-    for a in arrays { eval(a) }
+  /// Build 46 — host-side one-hot alignment from Int durations. Identical
+  /// output to createAlignmentTarget, without the per-frame item() syncs.
+  private static func hostAlignment(durations: [Int], batchSize: Int) -> MLXArray {
+    let total = durations.reduce(0, +)
+    var arr = [Float](repeating: 0, count: total * batchSize)
+    var frame = 0
+    for (idx, d) in durations.enumerated() {
+      for _ in 0 ..< d {
+        arr[idx * total + frame] = 1
+        frame += 1
+      }
+    }
+    return MLXArray(arr).reshaped([batchSize, total]).expandedDimensions(axis: 0)
   }
 
   /// Build 43 — record [min, max, rms] for a stage when collectStageStats is on.

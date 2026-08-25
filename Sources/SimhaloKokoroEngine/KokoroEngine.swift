@@ -42,22 +42,14 @@ public final class KokoroEngine: @unchecked Sendable {
     }
   }
 
-  // BUILD 43→45 LEVERS (2026-08-25) — corruption hunt. Forwarded to
+  // BUILD 43→46 LEVERS (2026-08-25) — resolved shape. Forwarded to
   // KokoroTTS / KokoroDiagFlags at synthesis time so they apply regardless of
-  // set-before-load / set-after-load ordering. Build 45: E2 (decoderBarrier)
-  // is PRODUCTION DEFAULT ON (arm C: kills the big-lazy-graph corruption
-  // class, ~±4% cost); Z removed (falsified on device); token-P removed
-  // (SIGSEGV + duration contamination); the two CPU pins are diagnostics.
-  private var evalBarrierOn = false
+  // set-before-load / set-after-load ordering. E2 barriers and the Swift
+  // duration head are PRODUCTION DEFAULTS (both A/B-able from the bench);
+  // every falsified hunt lever (Z, F, E, PD, G, token-P) has been removed.
   private var stageStatsOn = false
   private var decoderBarrierOn = true
-  private var frameStagePadOn = false
-  private var durationPinOn = false
-  private var stftPinOn = false
-  public var evalBarrier: Bool {
-    get { lock.lock(); defer { lock.unlock() }; return evalBarrierOn }
-    set { lock.lock(); defer { lock.unlock() }; evalBarrierOn = newValue }
-  }
+  private var swiftDurationHeadOn = true
   public var stageStats: Bool {
     get { lock.lock(); defer { lock.unlock() }; return stageStatsOn }
     set { lock.lock(); defer { lock.unlock() }; stageStatsOn = newValue }
@@ -68,20 +60,11 @@ public final class KokoroEngine: @unchecked Sendable {
     get { lock.lock(); defer { lock.unlock() }; return decoderBarrierOn }
     set { lock.lock(); defer { lock.unlock() }; decoderBarrierOn = newValue }
   }
-  /// F — frame-stage padding of asr/F0/N post-alignment (see KokoroTTS).
-  public var frameStagePad: Bool {
-    get { lock.lock(); defer { lock.unlock() }; return frameStagePadOn }
-    set { lock.lock(); defer { lock.unlock() }; frameStagePadOn = newValue }
-  }
-  /// PD — DIAGNOSTIC duration-head CPU pin (see KokoroDiagFlags — not a fix).
-  public var durationPin: Bool {
-    get { lock.lock(); defer { lock.unlock() }; return durationPinOn }
-    set { lock.lock(); defer { lock.unlock() }; durationPinOn = newValue }
-  }
-  /// G — decoder source/inverse STFT CPU pin (see KokoroDiagFlags).
-  public var decoderStftPin: Bool {
-    get { lock.lock(); defer { lock.unlock() }; return stftPinOn }
-    set { lock.lock(); defer { lock.unlock() }; stftPinOn = newValue }
+  /// SD — deterministic Swift duration head (see SwiftDurationHead).
+  /// PRODUCTION DEFAULT ON since build 46; bench may A/B it OFF.
+  public var swiftDurationHead: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return swiftDurationHeadOn }
+    set { lock.lock(); defer { lock.unlock() }; swiftDurationHeadOn = newValue }
   }
 
   // Per-chunk diagnostics of the most recent synthesize() call. Foundation
@@ -133,13 +116,10 @@ public final class KokoroEngine: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "unknown voice \(voiceId)"])
     }
     let language: Language = voiceId.hasPrefix("b") ? .enGB : .enUS
-    // Build 45: forward the levers at synthesis time (ordering-safe).
-    tts.evalBarrier = evalBarrierOn
+    // Build 46: forward the levers at synthesis time (ordering-safe).
     tts.collectStageStats = stageStatsOn
-    tts.frameStagePad = frameStagePadOn
     KokoroDiagFlags.decoderBarrier = decoderBarrierOn
-    KokoroDiagFlags.cpuDurationHead = durationPinOn
-    KokoroDiagFlags.cpuDecoderStft = stftPinOn
+    KokoroDiagFlags.swiftDurationHead = swiftDurationHeadOn
     chunkDiags = []
     // Sentence chunking: the engine caps at 510 phonemes per call, and long
     // single generations OOM 4GB devices. Sim lines are 1-3 sentences.
@@ -167,7 +147,6 @@ public final class KokoroEngine: @unchecked Sendable {
           "tokens_hash": d.tokensHash,
           "tokens_head": d.tokensHead,
           "frames_total": d.totalFrames,
-          "frames_padded": d.paddedFrames,
           "sample_start": sampleStart,
           "sample_count": audio.count,
         ]

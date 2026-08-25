@@ -151,23 +151,10 @@ class Generator {
     var (harSource, _, _) = mSource(f0New)
 
     harSource = MLX.squeezed(harSource.transposed(0, 2, 1), axis: 1)
-    // BUILD 45 CANDIDATE (cpuDecoderStft, branch β): the source STFT on the
-    // CPU stream — tiny nFft=20 kernels, suspected mlx #2205 wrong-kernel
-    // class on A-series. eval inside the scope (construction-time stream
-    // capture; no lazy escape).
-    let harSpec: MLXArray
-    let harPhase: MLXArray
-    if KokoroDiagFlags.cpuDecoderStft {
-      (harSpec, harPhase) = Device.withDefaultDevice(Device(.cpu)) {
-        let r = stft.transform(inputData: harSource)
-        MLX.eval(r.0, r.1)
-        return r
-      }
-    } else {
-      (harSpec, harPhase) = stft.transform(inputData: harSource)
-    }
-    // BUILD 44 (E2): decoder-internal barrier — materialise the source STFT
-    // before the upsample chain consumes it.
+    let (harSpec, harPhase) = stft.transform(inputData: harSource)
+    // BUILD 44→45 (E2, production default): materialise the source STFT
+    // before the upsample chain consumes it. (The 45 G-arm CPU pin here was
+    // falsified for the residual and removed in 46.)
     if KokoroDiagFlags.decoderBarrier { MLX.eval(harSpec, harPhase) }
 
     var har = MLX.concatenated([harSpec, harPhase], axis: 1)
@@ -211,23 +198,11 @@ class Generator {
     
     let spec = MLX.exp(newX[0..., 0 ..< (postNFFt / 2 + 1), 0...])
     let phase = MLX.sin(newX[0..., (postNFFt / 2 + 1)..., 0...])
-    // BUILD 44 (E2): materialise around the inverse STFT — the last internal
-    // boundary before samples exist.
+    // BUILD 44→45 (E2, production default): materialise around the inverse
+    // STFT — the last internal boundary before samples exist.
     if KokoroDiagFlags.decoderBarrier { MLX.eval(spec, phase) }
 
-    // BUILD 45 CANDIDATE (cpuDecoderStft, branch β): inverse STFT +
-    // overlap-add on the CPU stream — the spike geography (frame-quantised
-    // bursts) implicates exactly this region.
-    let result: MLXArray
-    if KokoroDiagFlags.cpuDecoderStft {
-      result = Device.withDefaultDevice(Device(.cpu)) {
-        let r = stft.inverse(magnitude: spec, phase: phase)
-        MLX.eval(r)
-        return r
-      }
-    } else {
-      result = stft.inverse(magnitude: spec, phase: phase)
-    }
+    let result = stft.inverse(magnitude: spec, phase: phase)
     if KokoroDiagFlags.decoderBarrier { MLX.eval(result) }
     return result
   }
