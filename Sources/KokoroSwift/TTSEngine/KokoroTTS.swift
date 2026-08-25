@@ -76,7 +76,9 @@ public final class KokoroTTS {
   private let durationProj: Linear!
 
   /// Build 46 — deterministic Swift duration head (production default path).
-  private let swiftDurationHead: SwiftDurationHead!
+  /// Optional by design: a failed weight extraction degrades to the MLX
+  /// duration path (wrong pacing, working voices) rather than crashing load.
+  private let swiftDurationHead: SwiftDurationHead?
   
   /// Predictor for prosodic features (F0, pitch)
   private let prosodyPredictor: ProsodyPredictor!
@@ -249,12 +251,12 @@ public final class KokoroTTS {
     let durationFeatures: MLXArray
     let predictedDurations: MLXArray
     let alignmentTarget: MLXArray
-    if KokoroDiagFlags.swiftDurationHead {
+    if KokoroDiagFlags.swiftDurationHead, let head = swiftDurationHead {
       let (bertOutput, _) = bert(paddedInputIds, attentionMask: attentionMask)
       let bertEncoded = bertEncoder(bertOutput)  // [1, T, dModel]
       let featHost = bertEncoded.asArray(Float.self)
       let styleHost = globalStyle.reshaped([-1]).asArray(Float.self)
-      let (dfHost, durs) = swiftDurationHead.run(
+      let (dfHost, durs) = head.run(
         features: featHost, tokenCount: realCount, style: styleHost, speed: speed)
       durationFeatures = MLXArray(dfHost).reshaped([1, realCount, dfHost.count / realCount])
       predictedDurations = MLXArray(durs.map { Int32($0) })

@@ -49,14 +49,21 @@ final class SwiftDurationHead {
   private let predictorLSTM: BiLSTM
   private let projW: [Float], projB: [Float]   // [maxDur×dModel], [maxDur]
 
-  init(weights: [String: MLXArray], nLayers: Int, dModel: Int, styleDim: Int) {
+  /// FAILABLE (build-46 review hardening): SD ships default-ON, so a missing
+  /// weight key must NEVER hard-crash voice loading. On any missing key the
+  /// init logs once and returns nil; the synth path then falls back to the
+  /// MLX duration path — worst case is wrong pacing with working voices,
+  /// same degrade philosophy as the zero-guard.
+  init?(weights: [String: MLXArray], nLayers: Int, dModel: Int, styleDim: Int) {
     self.nLayers = nLayers
     self.dModel = dModel
     self.styleDim = styleDim
 
+    var missingKey: String?
     func arr(_ key: String) -> [Float] {
-      guard let w = weights[key] else { fatalError("SwiftDurationHead: missing weight \(key)") }
-      return w.asType(.float32).asArray(Float.self)
+      if let w = weights[key] { return w.asType(.float32).asArray(Float.self) }
+      if missingKey == nil { missingKey = key }
+      return []
     }
     func lstm(_ prefix: String, inSize: Int, hidden: Int) -> BiLSTM {
       let bF = zip(arr("\(prefix).bias_ih_l0"), arr("\(prefix).bias_hh_l0")).map(+)
@@ -85,6 +92,11 @@ final class SwiftDurationHead {
     projW = arr("predictor.duration_proj.linear_layer.weight")
     projB = arr("predictor.duration_proj.linear_layer.bias")
     maxDur = projB.count
+
+    if let key = missingKey {
+      print("[SwiftDurationHead] missing weight \(key) — head unavailable, falling back to MLX duration path")
+      return nil
+    }
   }
 
   /// One direction of an LSTM over the sequence. Fixed evaluation order:
