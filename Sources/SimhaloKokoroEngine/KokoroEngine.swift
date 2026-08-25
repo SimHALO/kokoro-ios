@@ -23,6 +23,25 @@ public final class KokoroEngine: @unchecked Sendable {
   private var voices: [String: MLXArray] = [:]
   private let lock = NSLock()
 
+  // A/B LEVER for the device-corruption hunt (build 42, 2026-08-25). The same
+  // engine revision produces clean samples on Mac CPU AND Mac GPU (8/8 rows,
+  // zero bad) while the phone bench shows ±50-69 spikes — device-side only.
+  // The one cache behaviour unique to this facade is the 64MB cacheLimit +
+  // clearCache-per-chunk below; a plausible interaction with mlx's lazy evals
+  // / JIT kernel cache on A-series. `true` = discipline ON (current, build-34
+  // jetsam fix). `false` = 1GB limit, no per-chunk purge — bench-only setting
+  // to test whether the corruption follows the cache discipline. Expect a
+  // higher jetsam risk while off; that is the experiment, not a regression.
+  private var cacheDisciplineOn = true
+  public var cacheDiscipline: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return cacheDisciplineOn }
+    set {
+      lock.lock(); defer { lock.unlock() }
+      cacheDisciplineOn = newValue
+      Memory.cacheLimit = newValue ? 64 * 1024 * 1024 : 1024 * 1024 * 1024
+    }
+  }
+
   public var isLoaded: Bool {
     lock.lock(); defer { lock.unlock() }
     return tts != nil && !voices.isEmpty
@@ -46,7 +65,8 @@ public final class KokoroEngine: @unchecked Sendable {
     // trims; on top of 312MB fp32 weights, back-to-back syntheses walk the
     // footprint over the limit. Cap the cache small — synthesis prefers
     // re-allocation over a corpse — and purge after every chunk below.
-    Memory.cacheLimit = 64 * 1024 * 1024
+    // Build 42: honours the cacheDiscipline lever if it was set before load.
+    Memory.cacheLimit = cacheDisciplineOn ? 64 * 1024 * 1024 : 1024 * 1024 * 1024
     tts = try withError { KokoroTTS(modelPath: modelPath, g2p: .misaki) }
   }
 
@@ -79,7 +99,8 @@ public final class KokoroEngine: @unchecked Sendable {
       }
       // Return cached GPU buffers to the OS between chunks — the difference
       // between a bounded sawtooth and a monotonic climb into the watchdog.
-      Memory.clearCache()
+      // Build 42: skipped when the cacheDiscipline lever is OFF (A/B only).
+      if cacheDisciplineOn { Memory.clearCache() }
     }
     return (samples, KokoroTTS.Constants.samplingRate)
   }
