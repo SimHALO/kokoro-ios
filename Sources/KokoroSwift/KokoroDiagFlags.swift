@@ -63,7 +63,7 @@ public extension KokoroDiagFlags {
   /// BUILD 53 - pin the PREDICTION stack (aligned / F0 / N / textEncoder / asr)
   /// to the CPU stream. Those are the divergent-but-cheap stages; the vocoder
   /// stays on GPU because whole-CPU costs ~180x (Mac: 38.7s for a 3.4s row).
-  nonisolated(unsafe) static var cpuPredictors = true
+  nonisolated(unsafe) static var cpuPredictors = false
 
   /// BUILD 54 CANDIDATE - pin the generator's noise branch (noiseConvs +
   /// noiseRes) to the CPU stream. Default OFF pending device evidence that
