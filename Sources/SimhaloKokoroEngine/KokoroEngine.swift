@@ -138,7 +138,26 @@ public final class KokoroEngine: @unchecked Sendable {
       // the actual Metal message instead of dying.
       try autoreleasepool {
         let sampleStart = samples.count
-        let (audio, _) = try withError { try tts.generateAudio(voice: voice, language: language, text: chunk) }
+        // BUILD 52 — WHOLE-SYNTHESIS CPU STREAM (the decisive test, default ON).
+        // Build-51 (convPost pinned) took the device from static to muffled
+        // speech: centroid 8.4kHz -> 0.63-0.76kHz, HF>6k 0.83 -> 0.03, ZCR
+        // 0.65 -> 0.13. But the remaining gap is NOT confined to the vocoder —
+        // the generator's own INPUTS diverge on device (asr 0.64-0.81x Mac,
+        // f0 0.75-0.79x, n 0.42-0.52x), so the whole neural stack computes
+        // differently on A-series, and pinning single layers is whack-a-mole.
+        // Same weights file byte-for-byte, same code: the difference is the
+        // Metal kernels. This runs EVERYTHING on the CPU stream so device and
+        // Mac execute identical arithmetic. If the audio comes out right, the
+        // root cause is settled and we optimise from there (selective pinning);
+        // if it does not, GPU-vs-CPU was never the story. Cost is measured in
+        // synthMs either way — that is the other half of the answer.
+        let (audio, _) = try withError {
+          try KokoroDiagFlags.cpuSynthesis
+            ? Device.withDefaultDevice(Device(.cpu)) {
+                try tts.generateAudio(voice: voice, language: language, text: chunk)
+              }
+            : tts.generateAudio(voice: voice, language: language, text: chunk)
+        }
         samples.append(contentsOf: audio)
         // Build 43: per-chunk diagnostics — the sample window locates each
         // chunk's contribution so the bridge can attribute bad samples to

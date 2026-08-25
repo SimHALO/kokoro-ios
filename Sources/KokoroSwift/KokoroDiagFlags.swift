@@ -55,6 +55,11 @@ public extension KokoroDiagFlags {
   /// (same values either way); the flag exists so the bench can A/B it.
   nonisolated(unsafe) static var cpuPostConv = true
 
+  /// BUILD 52 — run the ENTIRE synthesis on the CPU stream. Default ON as the
+  /// decisive test of whether A-series Metal kernel divergence explains the
+  /// whole fault (it already explains the vocoder). A/B-able from the bench.
+  nonisolated(unsafe) static var cpuSynthesis = true
+
   nonisolated(unsafe) static var collectGenStats = false
   nonisolated(unsafe) static var genStats: [String: [Float]] = [:]
 
