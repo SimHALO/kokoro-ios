@@ -65,6 +65,11 @@ public extension KokoroDiagFlags {
   /// stays on GPU because whole-CPU costs ~180x (Mac: 38.7s for a 3.4s row).
   nonisolated(unsafe) static var cpuPredictors = true
 
+  /// BUILD 54 CANDIDATE - pin the generator's noise branch (noiseConvs +
+  /// noiseRes) to the CPU stream. Default OFF pending device evidence that
+  /// build 53 is insufficient; measured on Mac for cost only.
+  nonisolated(unsafe) static var cpuNoiseConvs = false
+
   nonisolated(unsafe) static var collectGenStats = false
   nonisolated(unsafe) static var genStats: [String: [Float]] = [:]
 

@@ -169,9 +169,25 @@ class Generator {
     var newX = x
     for i in 0 ..< numUpsamples {
       newX = LeakyReLU(negativeSlope: 0.1)(newX)
-      var xSource = noiseConvs[i](har)
-      xSource = MLX.swappedAxes(xSource, 2, 1)
-      xSource = noiseRes[i](xSource, s)
+      // BUILD 54 CANDIDATE (cpuNoiseConvs): the noise branch is the largest
+      // remaining device divergence after the predictor pin — xsrc0 measured
+      // 1.95-2.21x Mac on every row. It runs at STFT-frame rate, not sample
+      // rate, so it is one of the cheap pieces of the generator.
+      var xSource: MLXArray
+      if KokoroDiagFlags.cpuNoiseConvs {
+        let harIn = har
+        xSource = Device.withDefaultDevice(Device(.cpu)) {
+          var t = noiseConvs[i](harIn)
+          t = MLX.swappedAxes(t, 2, 1)
+          t = noiseRes[i](t, s)
+          MLX.eval(t)
+          return t
+        }
+      } else {
+        xSource = noiseConvs[i](har)
+        xSource = MLX.swappedAxes(xSource, 2, 1)
+        xSource = noiseRes[i](xSource, s)
+      }
       KokoroDiagFlags.genStat("gen_xsrc\(i)", xSource)
 
       newX = MLX.swappedAxes(newX, 2, 1)
