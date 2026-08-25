@@ -294,6 +294,10 @@ public final class KokoroTTS {
     diag.totalFrames = alignmentTarget.dim(-1)
 
     // Step 9: Generate audio
+    // BUILD 49: arm generator-internal telemetry for this call (bench-only —
+    // rides the same S lever as the stage stats above).
+    KokoroDiagFlags.collectGenStats = collectStageStats
+    KokoroDiagFlags.genStats = [:]
     let audio = decoder(
       asr: asrFeatures,
       F0Curve: f0Prediction,
@@ -301,6 +305,9 @@ public final class KokoroTTS {
       s: acousticStyle
     )[0]
     stat("audio", audio, into: &diag)
+    // Merge the generator internals in, then disarm.
+    for (k, v) in KokoroDiagFlags.genStats { diag.stageStats[k] = v }
+    KokoroDiagFlags.collectGenStats = false
 
     // Try to predict timestamp of each token if G2P processor returns tokens
     if let tokenArray {

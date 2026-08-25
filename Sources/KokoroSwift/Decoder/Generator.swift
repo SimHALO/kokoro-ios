@@ -151,11 +151,17 @@ class Generator {
     var (harSource, _, _) = mSource(f0New)
 
     harSource = MLX.squeezed(harSource.transposed(0, 2, 1), axis: 1)
+    // BUILD 49: generator-internal telemetry — the excitation, before any
+    // spectral shaping. Device audio is periodic-but-unshaped, so the first
+    // question is whether the source itself is sane.
+    KokoroDiagFlags.genStat("gen_harsource", harSource)
     let (harSpec, harPhase) = stft.transform(inputData: harSource)
     // BUILD 44→45 (E2, production default): materialise the source STFT
     // before the upsample chain consumes it. (The 45 G-arm CPU pin here was
     // falsified for the residual and removed in 46.)
     if KokoroDiagFlags.decoderBarrier { MLX.eval(harSpec, harPhase) }
+    KokoroDiagFlags.genStat("gen_harspec", harSpec)
+    KokoroDiagFlags.genStat("gen_harphase", harPhase)
 
     var har = MLX.concatenated([harSpec, harPhase], axis: 1)
     har = MLX.swappedAxes(har, 2, 1)
@@ -166,6 +172,7 @@ class Generator {
       var xSource = noiseConvs[i](har)
       xSource = MLX.swappedAxes(xSource, 2, 1)
       xSource = noiseRes[i](xSource, s)
+      KokoroDiagFlags.genStat("gen_xsrc\(i)", xSource)
 
       newX = MLX.swappedAxes(newX, 2, 1)
       newX = ups[i](newX, conv: MLX.convTransposed1d)
@@ -186,6 +193,9 @@ class Generator {
         }
       }
       newX = xs! / numKernels
+      // BUILD 49: per-upsample-group output — the shaping chain, block by
+      // block. Where device/Mac ratios diverge names the failing stage.
+      KokoroDiagFlags.genStat("gen_up\(i)", newX)
       // BUILD 44 (E2): materialise after each upsample block group.
       if KokoroDiagFlags.decoderBarrier { MLX.eval(newX) }
     }
@@ -195,15 +205,19 @@ class Generator {
     newX = MLX.swappedAxes(newX, 2, 1)
     newX = convPost(newX, conv: MLX.conv1d)
     newX = MLX.swappedAxes(newX, 2, 1)
+    KokoroDiagFlags.genStat("gen_postconv", newX)
     
     let spec = MLX.exp(newX[0..., 0 ..< (postNFFt / 2 + 1), 0...])
     let phase = MLX.sin(newX[0..., (postNFFt / 2 + 1)..., 0...])
     // BUILD 44→45 (E2, production default): materialise around the inverse
     // STFT — the last internal boundary before samples exist.
     if KokoroDiagFlags.decoderBarrier { MLX.eval(spec, phase) }
+    KokoroDiagFlags.genStat("gen_spec", spec)
+    KokoroDiagFlags.genStat("gen_phase", phase)
 
     let result = stft.inverse(magnitude: spec, phase: phase)
     if KokoroDiagFlags.decoderBarrier { MLX.eval(result) }
+    KokoroDiagFlags.genStat("gen_result", result)
     return result
   }
 }

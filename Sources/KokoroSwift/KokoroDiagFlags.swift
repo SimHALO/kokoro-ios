@@ -8,6 +8,7 @@
 //  for the full falsification record.
 
 import Foundation
+import MLX
 
 public enum KokoroDiagFlags {
   // nonisolated(unsafe): writes happen only from the SimhaloKokoroEngine
@@ -31,4 +32,32 @@ public enum KokoroDiagFlags {
   /// hunt; Mac kbench forces it ON (truth-exact there). Device pacing
   /// stays on the MLX path until BERT is resolved.
   public static nonisolated(unsafe) var swiftDurationHead = false
+}
+
+// BUILD 49 (2026-08-25) — GENERATOR-INTERNAL TELEMETRY.
+// Evidence that forced this: on device, every stage feeding the vocoder is
+// within ~2x of Mac (text_enc 0.65-0.69, dur_features 1.06-1.17, aligned
+// 1.16-1.48, f0 0.74-0.81, n 0.42-0.51, asr 0.64-0.88) and then `audio`
+// explodes 4.8-9.6x. Spectral analysis of device WAVs agrees: pitch structure
+// intact (harmonicity 0.73-0.96) but 76-91% of energy above 6 kHz, centroid
+// ~8.4 kHz vs Mac ~0.6 kHz — periodic excitation with NO spectral shaping.
+// The break is inside Generator.callAsFunction. These stats name the block.
+//
+// Collected only when KokoroTTS.collectStageStats is on (bench S lever), so
+// production pays nothing. Same external-synchronization contract as the
+// flags above: written on the single serial synth queue.
+public extension KokoroDiagFlags {
+  nonisolated(unsafe) static var collectGenStats = false
+  nonisolated(unsafe) static var genStats: [String: [Float]] = [:]
+
+  /// Record [min, max, rms] for a generator-internal tensor. The eval is
+  /// implicit in .item(); acceptable because this path is bench-only.
+  static func genStat(_ name: String, _ x: MLXArray) {
+    guard collectGenStats else { return }
+    let f = x.asType(.float32)
+    let mn: Float = f.min().item()
+    let mx: Float = f.max().item()
+    let rms: Float = MLX.sqrt(MLX.mean(f * f)).item()
+    genStats[name] = [mn, mx, rms]
+  }
 }
