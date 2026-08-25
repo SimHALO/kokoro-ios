@@ -20,9 +20,9 @@ let package = Package(
     ),
   ],
   dependencies: [
-    .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
+    .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.31.6"),
     // .package(url: "https://github.com/mlalma/eSpeakNGSwift", from: "1.0.1"),
-    .package(url: "https://github.com/SimHALO/MisakiSwift", revision: "8a2ab1c24344311914beb3a34c9f1d9966a945f8"),
+    .package(url: "https://github.com/SimHALO/MisakiSwift", revision: "6bcd16e39870daa6fbb0ba68b839ffd835f2bd39"),
     .package(url: "https://github.com/mlalma/MLXUtilsLibrary.git", exact: "0.0.6")
   ],
   targets: [

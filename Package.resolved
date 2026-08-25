@@ -1,12 +1,12 @@
 {
-  "originHash" : "f5307ce5168f3acab3de7df6662ce3d851e542ffc1f8a4060ef9b89389478b0e",
+  "originHash" : "1f9e608a25cba9ce19eaa691bdc06e88cb0b2ffc86daf60965a279cba881f1db",
   "pins" : [
     {
       "identity" : "misakiswift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SimHALO/MisakiSwift",
       "state" : {
-        "revision" : "8a2ab1c24344311914beb3a34c9f1d9966a945f8"
+        "revision" : "6bcd16e39870daa6fbb0ba68b839ffd835f2bd39"
       }
     },
     {
@@ -14,8 +14,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ml-explore/mlx-swift",
       "state" : {
-        "revision" : "f58bd2c2b3b84316da69182f436db4219aff30b9",
-        "version" : "0.30.2"
+        "revision" : "0bb916c67f4b9e5c682cbe02a42c701c93ab5021",
+        "version" : "0.31.6"
       }
     },
     {
@@ -25,6 +25,15 @@
       "state" : {
         "revision" : "41f6cfd5d68b65aa3c65a34efe3b71c371ed915b",
         "version" : "0.0.6"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
       }
     },
     {
