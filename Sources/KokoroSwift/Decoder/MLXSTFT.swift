@@ -96,30 +96,63 @@ func mlxStft(
     fatalError("Input is too short")
   }
 
-  // BUILD 44 AUDIT (2026-08-25): the framing arithmetic is provably in-bounds —
-  // floor((len-nFft)/hop) guarantees (numFrames-1)*hop + nFft <= len, and with
-  // center padding len >= nFft always. The residual hazard is the asStrided
-  // CONTIGUITY CONTRACT: xArray is a lazily-concatenated reflect-pad built from
-  // negative-stride slice views (see pad() above), and MLX.asStrided reads the
-  // input's flat buffer assuming row-contiguity. If that assumption is violated
-  // on the iOS Metal allocator path (recycled/donated buffers), reads land in
-  // garbage (stochastic spikes) or unmapped pages (SIGSEGV) — the mlx-swift
-  // #121 class. Toggle Z below removes the assumption entirely: explicit
-  // slice-stack framing uses only standard view primitives.
-  let frames: MLXArray
-  if KokoroDiagFlags.safeFraming {
-    frames = MLX.stacked(
-      (0 ..< numFrames).map { xArray[($0 * hopLen) ..< ($0 * hopLen + nFft)] },
-      axis: 0
-    )
-  } else {
-    let shape: [Int] = [numFrames, nFft]
-    let strides: [Int] = [hopLen, 1]
-    frames = MLX.asStrided(xArray, shape, strides: strides)
-  }
+  let frames = stftFrames(
+    xArray, numFrames: numFrames, nFft: nFft, hopLen: hopLen,
+    safe: KokoroDiagFlags.safeFraming)
 
   let spec = MLXFFT.rfft(frames * w)
   return spec.transposed(1, 0)
+}
+
+// BUILD 44 AUDIT (2026-08-25): the framing arithmetic is provably in-bounds —
+// floor((len-nFft)/hop) guarantees (numFrames-1)*hop + nFft <= len, and with
+// center padding len >= nFft always. The residual hazard is the asStrided
+// CONTIGUITY CONTRACT: xArray is a lazily-concatenated reflect-pad built from
+// negative-stride slice views (see pad() in mlxStft), and MLX.asStrided reads
+// the input's flat buffer assuming row-contiguity. If that assumption is
+// violated on the iOS Metal allocator path (recycled/donated buffers), reads
+// land in garbage (stochastic spikes) or unmapped pages (SIGSEGV) — the
+// mlx-swift #121 class. `safe` framing removes the assumption entirely.
+//
+// SAFE PATH IS O(1) GRAPH NODES: this STFT runs at SAMPLE rate (nFft=20,
+// hop=5), so per-frame slicing would fan out ~len/hop ops (carlos ≈ 93k) —
+// a hang on device. Because nFft % hop == 0, framing decomposes exactly:
+// reshape x into hop-sized rows R[j] = x[j*hop ..< (j+1)*hop]; frame i is
+// concat(R[i], R[i+1], …, R[i+ratio-1]). Exact-fit bound:
+// (numFrames-1)*hop + nFft == (numFrames+ratio-1)*hop <= len — the audit
+// bound verbatim, so the reshape slice always fits with zero padding.
+// Per-frame slice-stack survives only as the nFft % hop != 0 fallback
+// (dead for the current config).
+func stftFrames(_ xArray: MLXArray, numFrames: Int, nFft: Int, hopLen: Int, safe: Bool) -> MLXArray {
+  guard safe else {
+    return MLX.asStrided(xArray, [numFrames, nFft], strides: [hopLen, 1])
+  }
+  if nFft % hopLen == 0 {
+    let ratio = nFft / hopLen
+    let usable = (numFrames + ratio - 1) * hopLen
+    precondition(usable <= xArray.shape[0], "stftFrames: exact-fit bound violated")
+    let r = xArray[0 ..< usable].reshaped([numFrames + ratio - 1, hopLen])
+    return MLX.concatenated((0 ..< ratio).map { k in r[k ..< (k + numFrames)] }, axis: 1)
+  }
+  // Fallback (dead for current config): explicit per-frame slices.
+  return MLX.stacked(
+    (0 ..< numFrames).map { xArray[($0 * hopLen) ..< ($0 * hopLen + nFft)] },
+    axis: 0
+  )
+}
+
+/// BUILD 44 — bit-equality self-test for the safe framing path. Builds a
+/// deterministic ramp of `sampleCount` samples, frames it both ways, and
+/// returns the max abs difference (must be exactly 0).
+public enum KokoroFramingSelfTest {
+  public static func maxAbsDiff(sampleCount: Int, nFft: Int = 20, hopLen: Int = 5) -> Float {
+    let x = MLXArray(0 ..< sampleCount).asType(.float32) * 0.001
+    let numFrames = 1 + (sampleCount - nFft) / hopLen
+    guard numFrames > 0 else { return -1 }
+    let a = stftFrames(x, numFrames: numFrames, nFft: nFft, hopLen: hopLen, safe: false)
+    let b = stftFrames(x, numFrames: numFrames, nFft: nFft, hopLen: hopLen, safe: true)
+    return MLX.abs(a - b).max().item()
+  }
 }
 
 func mlxIstft(
