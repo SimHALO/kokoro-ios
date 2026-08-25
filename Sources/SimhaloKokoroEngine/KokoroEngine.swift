@@ -42,6 +42,35 @@ public final class KokoroEngine: @unchecked Sendable {
     }
   }
 
+  // BUILD 43 LEVERS (2026-08-25) — small-chunk corruption hunt. All default
+  // OFF; forwarded to KokoroTTS at synthesis time so they apply regardless of
+  // set-before-load / set-after-load ordering. See KokoroTTS for semantics.
+  private var padToBucketOn = false
+  private var evalBarrierOn = false
+  private var stageStatsOn = false
+  public var padToBucket: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return padToBucketOn }
+    set { lock.lock(); defer { lock.unlock() }; padToBucketOn = newValue }
+  }
+  public var evalBarrier: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return evalBarrierOn }
+    set { lock.lock(); defer { lock.unlock() }; evalBarrierOn = newValue }
+  }
+  public var stageStats: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return stageStatsOn }
+    set { lock.lock(); defer { lock.unlock() }; stageStatsOn = newValue }
+  }
+
+  // Per-chunk diagnostics of the most recent synthesize() call. Foundation
+  // types only (facade contract): chunk char count, token/frame accounting,
+  // the chunk's sample window in the returned buffer, and (when stageStats is
+  // on) per-stage [min,max,rms] flattened as "stat_<stage>" keys.
+  private var chunkDiags: [[String: Any]] = []
+  public var lastSynthChunkDiags: [[String: Any]] {
+    lock.lock(); defer { lock.unlock() }
+    return chunkDiags
+  }
+
   public var isLoaded: Bool {
     lock.lock(); defer { lock.unlock() }
     return tts != nil && !voices.isEmpty
@@ -81,6 +110,11 @@ public final class KokoroEngine: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "unknown voice \(voiceId)"])
     }
     let language: Language = voiceId.hasPrefix("b") ? .enGB : .enUS
+    // Build 43: forward the levers at synthesis time (ordering-safe).
+    tts.padToBucket = padToBucketOn
+    tts.evalBarrier = evalBarrierOn
+    tts.collectStageStats = stageStatsOn
+    chunkDiags = []
     // Sentence chunking: the engine caps at 510 phonemes per call, and long
     // single generations OOM 4GB devices. Sim lines are 1-3 sentences.
     var samples: [Float] = []
@@ -94,8 +128,24 @@ public final class KokoroEngine: @unchecked Sendable {
       // reaches the bridge, becomes a promise rejection, and the bench prints
       // the actual Metal message instead of dying.
       try autoreleasepool {
+        let sampleStart = samples.count
         let (audio, _) = try withError { try tts.generateAudio(voice: voice, language: language, text: chunk) }
         samples.append(contentsOf: audio)
+        // Build 43: per-chunk diagnostics — the sample window locates each
+        // chunk's contribution so the bridge can attribute bad samples to
+        // chunks and correlate with token/frame size.
+        let d = tts.lastDiag
+        var entry: [String: Any] = [
+          "chars": chunk.count,
+          "tokens_real": d.realTokens,
+          "tokens_padded": d.paddedTokens,
+          "frames_total": d.totalFrames,
+          "frames_true": d.trueFrames,
+          "sample_start": sampleStart,
+          "sample_count": audio.count,
+        ]
+        for (name, mmr) in d.stageStats { entry["stat_\(name)"] = mmr }
+        chunkDiags.append(entry)
       }
       // Return cached GPU buffers to the OS between chunks — the difference
       // between a bounded sawtooth and a monotonic climb into the watchdog.

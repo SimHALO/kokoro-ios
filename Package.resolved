@@ -1,13 +1,12 @@
 {
-  "originHash" : "6995a95a5fd6403a82fe9ad962d9f0b927e9c033322310a19b333bff1f345eb8",
+  "originHash" : "f5307ce5168f3acab3de7df6662ce3d851e542ffc1f8a4060ef9b89389478b0e",
   "pins" : [
     {
       "identity" : "misakiswift",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/mlalma/MisakiSwift",
+      "location" : "https://github.com/SimHALO/MisakiSwift",
       "state" : {
-        "revision" : "6835a1ce4a8854075c89f18ff75c74b13ef58e15",
-        "version" : "1.0.6"
+        "revision" : "8a2ab1c24344311914beb3a34c9f1d9966a945f8"
       }
     },
     {

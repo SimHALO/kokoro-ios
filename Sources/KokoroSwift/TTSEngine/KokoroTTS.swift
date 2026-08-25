@@ -28,7 +28,52 @@ public final class KokoroTTS {
     /// Thrown when input text exceeds maximum token count
     case tooManyTokens
   }
-  
+
+  // BUILD 43 (2026-08-25) — device-corruption hunt: instrumentation + candidate fix.
+  // Three device benches (iPhone 16 Pro Max, builds 41-42) corrupt ONLY on small
+  // chunks (≤ ~3.6s audio); Mac CPU + GPU are clean 8/8 on the same revision.
+  // Working theory: a small-size Metal kernel-variant path misbehaves on
+  // A-series. These levers are bench-driven; all default OFF (production
+  // behaviour identical to build 42 unless a lever is thrown).
+
+  /// Per-synthesis diagnostics, populated on every generateAudio call.
+  public struct SynthDiag {
+    /// Real token count incl. the two boundary zeros, before bucket padding.
+    public var realTokens = 0
+    /// Sequence length actually synthesised (== realTokens unless padToBucket).
+    public var paddedTokens = 0
+    /// Total decoder frames (incl. frames from pad tokens).
+    public var totalFrames = 0
+    /// Frames belonging to real tokens (audio trimmed to these when padding).
+    public var trueFrames = 0
+    /// Stage name -> [min, max, rms]. Only when collectStageStats is on.
+    public var stageStats: [String: [Float]] = [:]
+    public init() {}
+  }
+
+  /// CANDIDATE FIX — pad the token sequence to the next bucket in
+  /// {64, 128, 256, 512} with pad token 0. The mask infrastructure
+  /// (textMask / attentionMask / inputLengths) marks the pads exactly as
+  /// upstream StyleTTS2 batch padding does; pad tokens flow through the
+  /// duration predictor and decoder (lengthening the FRAME sequence too, so
+  /// the small-size path is avoided at both token and frame stage), and the
+  /// output audio is trimmed at the true-token frame boundary.
+  public var padToBucket = false
+
+  /// PROBE — force materialisation between pipeline stages. If corruption
+  /// vanishes under barriers, the defect is a lazy-graph/fusion race, not a
+  /// kernel-variant miscompute.
+  public var evalBarrier = false
+
+  /// PROBE — collect per-stage min/max/rms into lastDiag.stageStats for
+  /// golden comparison against a Mac reference run. NOTE: computing stats
+  /// forces evaluation (item() syncs), so stats themselves act as a partial
+  /// barrier — run with stats OFF to observe the undisturbed pipeline.
+  public var collectStageStats = false
+
+  /// Diagnostics of the most recent generateAudio call.
+  public private(set) var lastDiag = SynthDiag()
+
   /// BERT model for encoding phoneme sequences
   private let bert: CustomAlbert!
   
@@ -175,13 +220,18 @@ public final class KokoroTTS {
 
     // Step 1: Convert text to phonemes
     let (phonemizedText, tokenArray) = try phonemizeText(text)
-    
-    // Step 2: Tokenize and prepare input
-    let (paddedInputIds, attentionMask, inputLengths, textMask, inputIds) = try prepareInputTensors(phonemizedText)
-    
+
+    // Step 2: Tokenize and prepare input (build 43: realCount = tokens before
+    // bucket padding; == sequence length when padToBucket is off)
+    let (paddedInputIds, attentionMask, inputLengths, textMask, inputIds, realCount) = try prepareInputTensors(phonemizedText)
+
+    var diag = SynthDiag()
+    diag.realTokens = realCount
+    diag.paddedTokens = paddedInputIds.dim(-1)
+
     // Step 3: Extract style embeddings from voice
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
-    
+
     // Step 4: Encode text with BERT and predict duration
     let durationFeatures = encodeBERTAndDuration(
       inputIds: paddedInputIds,
@@ -190,24 +240,37 @@ public final class KokoroTTS {
       textMask: textMask,
       style: globalStyle
     )
-    
+    barrier(durationFeatures)
+    stat("dur_features", durationFeatures, into: &diag)
+
     // Step 5: Predict phoneme durations
     let (predictedDurations, alignmentTarget) = predictDurations(
       features: durationFeatures,
       batchSize: paddedInputIds.shape[1],
       speed: speed
     )
-    
+    barrier(predictedDurations, alignmentTarget)
+    stat("durations", predictedDurations.asType(.float32), into: &diag)
+
     // Step 6: Generate aligned encodings
     let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
-    
+    barrier(alignedEncoding)
+    stat("aligned", alignedEncoding, into: &diag)
+
     // Step 7: Predict prosody (F0, pitch)
     let (f0Prediction, nPrediction) = prosodyPredictor.F0NTrain(x: alignedEncoding, s: globalStyle)
-    
+    barrier(f0Prediction, nPrediction)
+    stat("f0", f0Prediction, into: &diag)
+    stat("n", nPrediction, into: &diag)
+
     // Step 8: Encode text for decoder
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
+    barrier(textEncoding)
+    stat("text_enc", textEncoding, into: &diag)
     let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
-    
+    barrier(asrFeatures)
+    stat("asr", asrFeatures, into: &diag)
+
     // Step 9: Generate audio
     let audio = decoder(
       asr: asrFeatures,
@@ -215,16 +278,52 @@ public final class KokoroTTS {
       N: nPrediction,
       s: acousticStyle
     )[0]
-    
+    stat("audio", audio, into: &diag)
+
     // Try to predict timestamp of each token if G2P processor returns tokens
     if let tokenArray {
       TimestampPredictor.preditTimestamps(tokens: tokenArray, predictionDuration: predictedDurations)
     }
-    
+
+    var samples = audio[0].asArray(Float.self)
+
+    // Build 43: frame accounting + audio trim for bucket padding. The
+    // alignment matrix lays frames out sequentially, so pad-token frames land
+    // at the END of the audio — trim at the true-token frame boundary.
+    let totalFrames = alignmentTarget.dim(-1)
+    diag.totalFrames = totalFrames
+    var trueFrames = totalFrames
+    if diag.paddedTokens > realCount {
+      let t: Int32 = predictedDurations[0 ..< realCount].sum().item()
+      trueFrames = Int(t)
+      if totalFrames > 0, trueFrames < totalFrames, samples.count % totalFrames == 0 {
+        let samplesPerFrame = samples.count / totalFrames
+        samples = Array(samples[0 ..< (samplesPerFrame * trueFrames)])
+      }
+    }
+    diag.trueFrames = trueFrames
+    lastDiag = diag
+
     // Stop performance timing
     BenchmarkTimer.stopTimer(Constants.bm_TTS)
 
-    return (audio[0].asArray(Float.self), tokenArray)
+    return (samples, tokenArray)
+  }
+
+  /// Build 43 — force materialisation between stages when evalBarrier is on.
+  private func barrier(_ arrays: MLXArray...) {
+    guard evalBarrier else { return }
+    for a in arrays { eval(a) }
+  }
+
+  /// Build 43 — record [min, max, rms] for a stage when collectStageStats is on.
+  private func stat(_ name: String, _ x: MLXArray, into diag: inout SynthDiag) {
+    guard collectStageStats else { return }
+    let f = x.asType(.float32)
+    let mn: Float = f.min().item()
+    let mx: Float = f.max().item()
+    let rms: Float = MLX.sqrt(MLX.mean(f * f)).item()
+    diag.stageStats[name] = [mn, mx, rms]
   }
   
   /// Updates the G2P language if it differs from the current language.
@@ -252,37 +351,54 @@ public final class KokoroTTS {
   /// - Returns: Tuple containing:
   ///   - paddedInputIds: Tokenized and padded input sequence
   ///   - attentionMask: Mask for attention mechanism
-  ///   - inputLengths: Length of input sequence
-  ///   - textMask: Mask for text padding
+  ///   - inputLengths: REAL length of input sequence (excl. bucket pads)
+  ///   - textMask: Mask for text padding (true at bucket-pad positions)
   ///   - inputIds: Original token IDs before padding
-  private func prepareInputTensors(_ phonemizedText: String) throws -> (MLXArray, MLXArray, MLXArray, MLXArray, [Int]) {
+  ///   - realCount: token count incl. boundary zeros, excl. bucket pads
+  private func prepareInputTensors(_ phonemizedText: String) throws -> (MLXArray, MLXArray, MLXArray, MLXArray, [Int], Int) {
     // Tokenize phonemized text
     let inputIds = Tokenizer.tokenize(phonemizedText: phonemizedText)
-    
+
     // Check token count limit
     guard inputIds.count <= Constants.maxTokenCount else {
       throw KokoroTTSError.tooManyTokens
     }
 
     // Add padding tokens at start and end
-    let paddedInputIdsArray = [0] + inputIds + [0]
+    var paddedInputIdsArray = [0] + inputIds + [0]
+    let realCount = paddedInputIdsArray.count
+
+    // Build 43 — CANDIDATE FIX: bucket padding. Device benches corrupt only on
+    // small sequences; pad to the next bucket so short chunks traverse the
+    // same kernel-size class as the (clean) longer ones. The masks below mark
+    // the pads, exactly as upstream batch padding would.
+    if padToBucket {
+      let buckets = [64, 128, 256, 512]
+      if let bucket = buckets.first(where: { $0 >= realCount }), bucket > realCount {
+        paddedInputIdsArray += Array(repeating: 0, count: bucket - realCount)
+      }
+    }
+
     let paddedInputIds = MLXArray(paddedInputIdsArray).expandedDimensions(axes: [0])
 
-    // Create input length tensor
-    let inputLengths = MLXArray(paddedInputIds.dim(-1))
-    let inputLengthMax: Int = inputLengths.max().item()
-    
+    // Create input length tensor — REAL length: with bucket padding active the
+    // masks derived from it flag every pad position; without padding the
+    // sequence length equals realCount and nothing is masked (pre-43 semantics
+    // preserved bit-for-bit).
+    let inputLengths = MLXArray(realCount)
+    let inputLengthMax: Int = paddedInputIds.dim(-1)
+
     // Create text mask for padding positions
     var textMask = MLXArray(0 ..< inputLengthMax)
     textMask = textMask + 1 .> inputLengths
     textMask = textMask.expandedDimensions(axes: [0])
-    
+
     // Create attention mask (1 for valid positions, 0 for padding)
     let swiftTextMask: [Bool] = textMask.asArray(Bool.self)
     let swiftTextMaskInt = swiftTextMask.map { !$0 ? 1 : 0 }
     let attentionMask = MLXArray(swiftTextMaskInt).reshaped(textMask.shape)
 
-    return (paddedInputIds, attentionMask, inputLengths, textMask, inputIds)
+    return (paddedInputIds, attentionMask, inputLengths, textMask, inputIds, realCount)
   }
   
   /// Extracts style embeddings from the voice array.
