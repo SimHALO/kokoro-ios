@@ -1,10 +1,12 @@
 //
 //  Kokoro-tts-lib
 //
-//  BUILD 44 (2026-08-25) — corruption-hunt levers that live below KokoroTTS's
-//  instance surface (free functions / deep module internals consult these).
-//  Bench-driven; both default OFF; production behaviour identical unless a
-//  lever is thrown. Set via the SimhaloKokoroEngine facade.
+//  BUILD 44→45 (2026-08-25) — corruption-hunt levers that live below
+//  KokoroTTS's instance surface (free functions / deep module internals
+//  consult these). Set via the SimhaloKokoroEngine facade.
+//  Build-45 disposition: decoderBarrier is the PRODUCTION DEFAULT (ON);
+//  the two CPU pins are bench diagnostics; Z (safeFraming) was falsified
+//  on device (arm B: corruption at control rates) and is REMOVED.
 
 import Foundation
 
@@ -13,31 +15,28 @@ public enum KokoroDiagFlags {
   // facade under its lock, before synthesis starts, on the single serial
   // synth queue — external synchronization per the Swift 6 escape hatch.
 
-  /// Z — bypass MLX.asStrided in STFT framing: explicit slice-stack framing
-  /// using only standard view primitives. Removes the asStrided contiguity
-  /// assumption suspected in the device-only decoder corruption + SIGSEGV
-  /// class (mlx-swift #121). See MLXSTFT.mlxStft.
-  public static nonisolated(unsafe) var safeFraming = false
+  /// E2 — materialisation at decoder-INTERNAL boundaries (post source-STFT,
+  /// per upsample block group, around the inverse STFT).
+  /// BUILD 45: PRODUCTION DEFAULT ON. Arm C proved it kills the big-lazy-
+  /// graph corruption class outright (carlos, worst row of the hunt: 0/0/0
+  /// under ±0.93 — first clean run ever) at ~±4% device cost. The flag stays
+  /// so the bench can A/B it OFF. See Generator.callAsFunction.
+  public static nonisolated(unsafe) var decoderBarrier = true
 
-  /// E2 — force materialisation at decoder-INTERNAL boundaries (post
-  /// source-STFT, per upsample block group, around the inverse STFT). The
-  /// stage-level barrier was falsified by build-43 run-3: stats-ON synced
-  /// every stage boundary and audio still corrupted — the defect is inside
-  /// the decoder graph. See Generator.callAsFunction.
-  public static nonisolated(unsafe) var decoderBarrier = false
-
-  /// BUILD 45 CANDIDATE — pin the ENTIRE token→durations path (BERT +
-  /// durationEncoder + LSTM + proj + sigmoid/round) to the CPU stream.
-  /// A2 fix: arm-D adjudication proved every token-identical chunk gets
-  /// deterministically different durations on the device GPU (−56%..+193%);
-  /// Mac CPU == Mac GPU sample counts prove the CPU reference is the model's
-  /// true output. See KokoroTTS.generateAudio.
+  /// DIAGNOSTIC — pin the ENTIRE token→durations path (BERT + durationEncoder
+  /// + LSTM + proj + sigmoid/round) to the CPU stream. NOT a fix: ground truth
+  /// (upstream Kokoro PyTorch) matches the MAC-GPU durations sample-exactly on
+  /// all comparable texts, and BOTH device-GPU and CPU backends diverge from
+  /// it (dan: PyTorch/Mac-GPU 116 vs device-GPU 96 vs CPU 55 — the duration
+  /// head is numerically fragile off the reference path). Retained so the
+  /// device bench can measure whether CPU-durations move the corruption.
+  /// The 46 pacing fix is a deterministic plain-Swift duration head.
   public static nonisolated(unsafe) var cpuDurationHead = false
 
-  /// BUILD 45 CANDIDATE (branch β) — pin the decoder's source-STFT and
-  /// inverse-STFT to the CPU stream. Arm-B falsified the asStrided theory;
-  /// spike geography (frame-quantised bursts) points at the tiny
-  /// nFft=20 FFT/overlap-add kernels — the mlx #2205 wrong-kernel class on
-  /// A-series. Tiny FFTs: expected performance-neutral. See Generator.
+  /// G (bench toggle) — pin the decoder's source-STFT and inverse-STFT to the
+  /// CPU stream. Targeted probe for the small-shape residual that survives
+  /// S/Z/E2 (frame-quantised spike bursts implicate the tiny nFft=20
+  /// FFT/overlap-add kernels — the mlx #2205 wrong-kernel class on A-series).
+  /// Mac-verified shape-neutral. See Generator.
   public static nonisolated(unsafe) var cpuDecoderStft = false
 }

@@ -245,12 +245,13 @@ public final class KokoroTTS {
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
 
     // Steps 4+5: BERT → duration features → durations (+ alignment).
-    // BUILD 45 CANDIDATE (cpuDurationHead): the whole token→durations path on
-    // the CPU stream — A2 is a device-GPU numeric defect (arm-D: all
-    // token-identical chunks diverge deterministically, −56%..+193%), and
-    // Mac CPU == Mac GPU proves the CPU reference is the model's true output.
-    // eval() INSIDE the scope: mlx ops capture the default stream at
-    // construction; nothing may escape lazily onto the GPU stream.
+    // BUILD 45 DIAGNOSTIC (cpuDurationHead): whole token→durations path on
+    // the CPU stream. NOT a fix — ground truth (upstream Kokoro PyTorch)
+    // matches MAC-GPU durations sample-exactly; device-GPU AND CPU both
+    // diverge (dan: 116 truth vs 96 device-GPU vs 55 CPU). Retained so the
+    // bench can measure whether CPU-durations move the corruption. 46 pacing
+    // fix = deterministic plain-Swift duration head. eval() INSIDE the scope:
+    // mlx ops capture the default stream at construction.
     func durationPath() -> (MLXArray, MLXArray, MLXArray) {
       let df = encodeBERTAndDuration(
         inputIds: paddedInputIds,

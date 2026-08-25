@@ -42,16 +42,18 @@ public final class KokoroEngine: @unchecked Sendable {
     }
   }
 
-  // BUILD 43→44 LEVERS (2026-08-25) — corruption hunt. All default OFF;
-  // forwarded to KokoroTTS / KokoroDiagFlags at synthesis time so they apply
-  // regardless of set-before-load / set-after-load ordering. Build-43's
-  // token-padding lever (P) is REMOVED — device SIGSEGV + duration
-  // contamination. See KokoroTTS + KokoroDiagFlags for semantics.
+  // BUILD 43→45 LEVERS (2026-08-25) — corruption hunt. Forwarded to
+  // KokoroTTS / KokoroDiagFlags at synthesis time so they apply regardless of
+  // set-before-load / set-after-load ordering. Build 45: E2 (decoderBarrier)
+  // is PRODUCTION DEFAULT ON (arm C: kills the big-lazy-graph corruption
+  // class, ~±4% cost); Z removed (falsified on device); token-P removed
+  // (SIGSEGV + duration contamination); the two CPU pins are diagnostics.
   private var evalBarrierOn = false
   private var stageStatsOn = false
-  private var safeFramingOn = false
-  private var decoderBarrierOn = false
+  private var decoderBarrierOn = true
   private var frameStagePadOn = false
+  private var durationPinOn = false
+  private var stftPinOn = false
   public var evalBarrier: Bool {
     get { lock.lock(); defer { lock.unlock() }; return evalBarrierOn }
     set { lock.lock(); defer { lock.unlock() }; evalBarrierOn = newValue }
@@ -60,12 +62,8 @@ public final class KokoroEngine: @unchecked Sendable {
     get { lock.lock(); defer { lock.unlock() }; return stageStatsOn }
     set { lock.lock(); defer { lock.unlock() }; stageStatsOn = newValue }
   }
-  /// Z — asStrided-free STFT framing (see MLXSTFT / KokoroDiagFlags).
-  public var safeFraming: Bool {
-    get { lock.lock(); defer { lock.unlock() }; return safeFramingOn }
-    set { lock.lock(); defer { lock.unlock() }; safeFramingOn = newValue }
-  }
   /// E2 — decoder-internal materialisation barriers (see Generator).
+  /// PRODUCTION DEFAULT ON since build 45; bench may A/B it OFF.
   public var decoderBarrier: Bool {
     get { lock.lock(); defer { lock.unlock() }; return decoderBarrierOn }
     set { lock.lock(); defer { lock.unlock() }; decoderBarrierOn = newValue }
@@ -74,6 +72,16 @@ public final class KokoroEngine: @unchecked Sendable {
   public var frameStagePad: Bool {
     get { lock.lock(); defer { lock.unlock() }; return frameStagePadOn }
     set { lock.lock(); defer { lock.unlock() }; frameStagePadOn = newValue }
+  }
+  /// PD — DIAGNOSTIC duration-head CPU pin (see KokoroDiagFlags — not a fix).
+  public var durationPin: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return durationPinOn }
+    set { lock.lock(); defer { lock.unlock() }; durationPinOn = newValue }
+  }
+  /// G — decoder source/inverse STFT CPU pin (see KokoroDiagFlags).
+  public var decoderStftPin: Bool {
+    get { lock.lock(); defer { lock.unlock() }; return stftPinOn }
+    set { lock.lock(); defer { lock.unlock() }; stftPinOn = newValue }
   }
 
   // Per-chunk diagnostics of the most recent synthesize() call. Foundation
@@ -125,12 +133,13 @@ public final class KokoroEngine: @unchecked Sendable {
                     userInfo: [NSLocalizedDescriptionKey: "unknown voice \(voiceId)"])
     }
     let language: Language = voiceId.hasPrefix("b") ? .enGB : .enUS
-    // Build 44: forward the levers at synthesis time (ordering-safe).
+    // Build 45: forward the levers at synthesis time (ordering-safe).
     tts.evalBarrier = evalBarrierOn
     tts.collectStageStats = stageStatsOn
     tts.frameStagePad = frameStagePadOn
-    KokoroDiagFlags.safeFraming = safeFramingOn
     KokoroDiagFlags.decoderBarrier = decoderBarrierOn
+    KokoroDiagFlags.cpuDurationHead = durationPinOn
+    KokoroDiagFlags.cpuDecoderStft = stftPinOn
     chunkDiags = []
     // Sentence chunking: the engine caps at 510 phonemes per call, and long
     // single generations OOM 4GB devices. Sim lines are 1-3 sentences.
